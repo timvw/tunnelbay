@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.6
 
-FROM rust:1.84 AS builder
+FROM rust:1.91 AS builder
 RUN rustup target add x86_64-unknown-linux-musl
 WORKDIR /app
 
