@@ -9,9 +9,13 @@ COPY Cargo.toml Cargo.lock ./
 COPY proto/Cargo.toml proto/Cargo.toml
 COPY bay/Cargo.toml bay/Cargo.toml
 COPY buoy/Cargo.toml buoy/Cargo.toml
-RUN apt-get update && apt-get install -y musl-tools && \
-    ln -s /usr/bin/musl-gcc /usr/bin/x86_64-unknown-linux-musl-gcc && \
-    mkdir -p proto/src bay/src buoy/src && \
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends musl-tools && \
+    ln -sf /usr/bin/musl-gcc /usr/bin/x86_64-unknown-linux-musl-gcc && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN mkdir -p proto/src bay/src buoy/src && \
     echo 'pub fn stub() {}' > proto/src/lib.rs && \
     echo 'fn main() {}' > bay/src/main.rs && \
     echo 'fn main() {}' > buoy/src/main.rs && \

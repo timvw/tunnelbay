@@ -4,14 +4,18 @@ default:
 
 # Build bay image
 build-bay:
-	@docker build \
+	@docker buildx build \
+		--platform linux/amd64 \
+		--load \
 		-f docker/bay/Dockerfile \
 		-t tunnelbay-bay:dev \
 		.
 
 # Build buoy image
 build-buoy:
-	@docker build \
+	@docker buildx build \
+		--platform linux/amd64 \
+		--load \
 		-f docker/buoy/Dockerfile \
 		-t tunnelbay-buoy:dev \
 		.

@@ -39,6 +39,17 @@ Rust workspace with two binaries:
    ```
    Replace `abc123` with the slug the buoy printed. You should see the content served by your local HTTP server.
 
+### Building container images
+
+Use the provided Justfile targets (requires Docker Buildx):
+
+```bash
+just build-bay   # builds linux/amd64 bay image
+just build-buoy  # builds linux/amd64 buoy image
+```
+
+The workflow `.github/workflows/release-images.yaml` runs the same builds on tags and publishes to GHCR.
+
 ## How it works
 
 1. Buoy opens a persistent TCP connection to bay and sends a JSON registration message with the target local port.
