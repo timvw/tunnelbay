@@ -11,7 +11,7 @@ use axum::{
     Router,
 };
 use base64::{engine::general_purpose, Engine as _};
-use futures::{SinkExt, StreamExt};
+use futures::{future, SinkExt, StreamExt};
 use proto::{ClientToServer, Header, ServerToClient};
 use rand::{distributions::Alphanumeric, Rng};
 use tokio::{
@@ -52,7 +52,7 @@ async fn main() -> Result<()> {
     });
 
     tokio::select! {
-        _ = tokio::signal::ctrl_c() => {
+        _ = shutdown_signal() => {
             println!("Shutting down TunnelBay...");
         }
         res = http_task => {
@@ -90,6 +90,18 @@ async fn run_control_server(state: Arc<AppState>, addr: String) -> Result<()> {
     )
     .await?;
     Ok(())
+}
+
+async fn shutdown_signal() {
+    match tokio::signal::ctrl_c().await {
+        Ok(()) => {}
+        Err(err) => {
+            eprintln!(
+                "Failed to install CTRL+C handler: {err}. Continuing without signal handling."
+            );
+            future::pending::<()>().await;
+        }
+    }
 }
 
 async fn proxy_handler(
