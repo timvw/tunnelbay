@@ -1,0 +1,6 @@
+[workspace]
+members = [
+    "bay",
+    "buoy"
+, "proto"]
+resolver = "2"
