@@ -7,14 +7,17 @@ use reqwest::{
     header::{HeaderName, HeaderValue},
     Client as HttpClient, Method,
 };
-use tokio::net::{tcp::OwnedReadHalf, TcpStream};
-use tokio_util::codec::{FramedRead, FramedWrite, LinesCodec};
+use tokio_tungstenite::{connect_async, tungstenite::protocol::Message as WsMessage};
 
 #[derive(Parser, Debug)]
 struct Args {
-    /// Address of the bay control plane (host:port)
-    #[arg(long, env = "TUNNELBAY_BAY_ADDR", default_value = "127.0.0.1:7000")]
-    bay_addr: String,
+    /// WebSocket URL for the bay control plane
+    #[arg(
+        long,
+        env = "TUNNELBAY_CONTROL_URL",
+        default_value = "ws://127.0.0.1:7070/control"
+    )]
+    control_url: String,
     /// Local TCP port to forward
     #[arg(long, env = "TUNNELBAY_LOCAL_PORT", default_value_t = 3000)]
     port: u16,
@@ -27,36 +30,42 @@ struct Args {
 async fn main() -> Result<()> {
     let args = Args::parse();
 
-    let stream = TcpStream::connect(&args.bay_addr)
+    let (ws_stream, _) = connect_async(&args.control_url)
         .await
-        .with_context(|| format!("failed to connect to bay at {}", args.bay_addr))?;
-
-    let (read_half, write_half) = stream.into_split();
-    let mut reader = FramedRead::new(read_half, LinesCodec::new());
-    let mut writer = FramedWrite::new(write_half, LinesCodec::new());
+        .with_context(|| format!("failed to connect to bay at {}", args.control_url))?;
+    let (mut ws_writer, mut ws_reader) = ws_stream.split();
 
     let register = ClientToServer::Register {
         client_name: None,
         local_port: args.port,
         requested_subdomain: args.subdomain.clone(),
     };
-    writer
-        .send(serde_json::to_string(&register)?)
+    ws_writer
+        .send(WsMessage::Text(serde_json::to_string(&register)?))
         .await
         .context("failed to send register message")?;
 
-    let hostname = wait_for_hostname(&mut reader).await?;
+    let hostname = wait_for_hostname(&mut ws_reader, &mut ws_writer).await?;
     println!("Tunnel ready: https://{hostname}");
     println!("Forwarding requests to http://127.0.0.1:{}", args.port);
 
     let client = HttpClient::new();
 
-    while let Some(line) = reader.next().await {
-        let line = match line {
-            Ok(line) => line,
+    while let Some(frame) = ws_reader.next().await {
+        let text = match frame {
+            Ok(WsMessage::Text(text)) => text,
+            Ok(WsMessage::Ping(payload)) => {
+                let _ = ws_writer.send(WsMessage::Pong(payload)).await;
+                continue;
+            }
+            Ok(WsMessage::Pong(_)) => continue,
+            Ok(WsMessage::Binary(_)) => continue,
+            Ok(WsMessage::Close(_)) => break,
+            Ok(WsMessage::Frame(_)) => continue,
             Err(err) => return Err(err.into()),
         };
-        let message: ServerToClient = serde_json::from_str(&line)?;
+
+        let message: ServerToClient = serde_json::from_str(&text)?;
 
         match message {
             ServerToClient::Registered { hostname } => {
@@ -88,7 +97,7 @@ async fn main() -> Result<()> {
                 };
 
                 let line = serde_json::to_string(&response)?;
-                if writer.send(line).await.is_err() {
+                if ws_writer.send(WsMessage::Text(line)).await.is_err() {
                     break;
                 }
             }
@@ -99,18 +108,27 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn wait_for_hostname(reader: &mut FramedRead<OwnedReadHalf, LinesCodec>) -> Result<String> {
-    while let Some(line) = reader.next().await {
-        let line = match line {
-            Ok(line) => line,
-            Err(err) => return Err(err.into()),
-        };
-        match serde_json::from_str::<ServerToClient>(&line)? {
-            ServerToClient::Registered { hostname } => return Ok(hostname),
-            other => {
-                // Unexpected request before registration, ignore and continue
-                eprintln!("Received {other:?} before hostname assignment");
+async fn wait_for_hostname(
+    reader: &mut (impl futures::Stream<Item = Result<WsMessage, tokio_tungstenite::tungstenite::Error>>
+              + Unpin),
+    writer: &mut (impl futures::Sink<WsMessage, Error = tokio_tungstenite::tungstenite::Error> + Unpin),
+) -> Result<String> {
+    while let Some(frame) = reader.next().await {
+        match frame {
+            Ok(WsMessage::Text(text)) => match serde_json::from_str::<ServerToClient>(&text)? {
+                ServerToClient::Registered { hostname } => return Ok(hostname),
+                other => {
+                    eprintln!("Received {other:?} before hostname assignment");
+                }
+            },
+            Ok(WsMessage::Ping(payload)) => {
+                let _ = writer.send(WsMessage::Pong(payload)).await;
             }
+            Ok(WsMessage::Pong(_)) => {}
+            Ok(WsMessage::Binary(_)) => {}
+            Ok(WsMessage::Close(_)) => break,
+            Ok(WsMessage::Frame(_)) => {}
+            Err(err) => return Err(err.into()),
         }
     }
 

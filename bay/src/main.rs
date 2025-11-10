@@ -1,11 +1,13 @@
-use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
+use std::{collections::HashMap, env, net::SocketAddr, sync::Arc, time::Duration};
 
 use anyhow::Result;
 use axum::{
     body::{to_bytes, Body},
-    extract::{Host, State},
-    http::{Request, Response, StatusCode},
-    routing::any,
+    extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade},
+    extract::{ConnectInfo, Host, State},
+    http::{header::HeaderName, header::HeaderValue, HeaderMap, Request, Response, StatusCode},
+    response::IntoResponse,
+    routing::{any, get},
     Router,
 };
 use base64::{engine::general_purpose, Engine as _};
@@ -13,32 +15,38 @@ use futures::{SinkExt, StreamExt};
 use proto::{ClientToServer, Header, ServerToClient};
 use rand::{distributions::Alphanumeric, Rng};
 use tokio::{
-    net::{TcpListener, TcpStream},
+    net::TcpListener,
     sync::{mpsc, oneshot, Mutex, RwLock},
 };
-use tokio_util::codec::{FramedRead, FramedWrite, LinesCodec};
 use uuid::Uuid;
 
 const DEFAULT_DOMAIN: &str = "bay.localhost";
-const CONTROL_ADDR: &str = "0.0.0.0:7000";
-const HTTP_ADDR: &str = "0.0.0.0:8080";
+const DEFAULT_CONTROL_ADDR: &str = "0.0.0.0:7070";
+const DEFAULT_HTTP_ADDR: &str = "0.0.0.0:8080";
 const MAX_REQUEST_BYTES: usize = 2 * 1024 * 1024; // 2 MiB
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let state = Arc::new(AppState::new(DEFAULT_DOMAIN.into()));
+    let settings = Settings::from_env();
+    println!(
+        "Starting TunnelBay with domain {} (HTTP {}, control {})",
+        settings.domain, settings.http_addr, settings.control_addr
+    );
+    let state = Arc::new(AppState::new(settings.domain.clone()));
 
     let http_state = state.clone();
     let ctrl_state = state.clone();
+    let http_addr = settings.http_addr.clone();
+    let control_addr = settings.control_addr.clone();
 
     let http_task = tokio::spawn(async move {
-        if let Err(err) = run_http_server(http_state).await {
+        if let Err(err) = run_http_server(http_state, http_addr).await {
             eprintln!("http server error: {err:?}");
         }
     });
 
     let ctrl_task = tokio::spawn(async move {
-        if let Err(err) = run_control_listener(ctrl_state).await {
+        if let Err(err) = run_control_server(ctrl_state, control_addr).await {
             eprintln!("control listener error: {err:?}");
         }
     });
@@ -62,11 +70,25 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn run_http_server(state: Arc<AppState>) -> Result<()> {
+async fn run_http_server(state: Arc<AppState>, addr: String) -> Result<()> {
     let app = Router::new().fallback(any(proxy_handler)).with_state(state);
-    let listener = TcpListener::bind(HTTP_ADDR).await?;
-    println!("HTTP endpoint listening on http://{HTTP_ADDR}");
-    axum::serve(listener, app).await?;
+    let listener = TcpListener::bind(&addr).await?;
+    println!("HTTP endpoint listening on http://{addr}");
+    axum::serve(listener, app.into_make_service()).await?;
+    Ok(())
+}
+
+async fn run_control_server(state: Arc<AppState>, addr: String) -> Result<()> {
+    let app = Router::new()
+        .route("/control", get(control_ws_handler))
+        .with_state(state);
+    let listener = TcpListener::bind(&addr).await?;
+    println!("Control endpoint listening on ws://{addr}/control");
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }
 
@@ -121,35 +143,80 @@ async fn proxy_handler(
         .map_err(|_| StatusCode::GATEWAY_TIMEOUT)?
         .map_err(|_| StatusCode::BAD_GATEWAY)?;
 
-    convert_response(response)
+    let mut response = convert_response(response)?;
+    if let Ok(value) = HeaderValue::from_str(&tunnel.ip_address) {
+        response
+            .headers_mut()
+            .insert(HeaderName::from_static("x-forwarded-for"), value);
+    }
+    Ok(response)
 }
 
-async fn run_control_listener(state: Arc<AppState>) -> Result<()> {
-    let listener = TcpListener::bind(CONTROL_ADDR).await?;
-    println!("Waiting for buoy connections on {CONTROL_ADDR}");
+async fn control_ws_handler(
+    ws: WebSocketUpgrade,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let source_ip = headers
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|value| value.split(',').next())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| addr.ip().to_string());
 
-    loop {
-        let (stream, addr) = listener.accept().await?;
+    ws.on_upgrade(move |socket| {
         let state = state.clone();
-        tokio::spawn(async move {
-            if let Err(err) = handle_buoy(stream, addr, state).await {
-                eprintln!("connection from {addr} failed: {err:?}");
+        async move {
+            if let Err(err) = handle_buoy_ws(socket, state, source_ip).await {
+                eprintln!("buoy connection closed: {err:?}");
             }
-        });
+        }
+    })
+}
+
+struct Settings {
+    domain: String,
+    control_addr: String,
+    http_addr: String,
+}
+
+impl Settings {
+    fn from_env() -> Self {
+        let domain = env::var("BAY_DOMAIN").unwrap_or_else(|_| DEFAULT_DOMAIN.to_string());
+        let control_addr =
+            env::var("BAY_CONTROL_ADDR").unwrap_or_else(|_| DEFAULT_CONTROL_ADDR.to_string());
+        let http_addr = env::var("BAY_HTTP_ADDR").unwrap_or_else(|_| DEFAULT_HTTP_ADDR.to_string());
+
+        Self {
+            domain,
+            control_addr,
+            http_addr,
+        }
     }
 }
 
-async fn handle_buoy(stream: TcpStream, addr: SocketAddr, state: Arc<AppState>) -> Result<()> {
-    let (read_half, write_half) = stream.into_split();
-    let mut reader = FramedRead::new(read_half, LinesCodec::new());
-    let writer = FramedWrite::new(write_half, LinesCodec::new());
+async fn handle_buoy_ws(socket: WebSocket, state: Arc<AppState>, ip_address: String) -> Result<()> {
+    let (sender, mut receiver) = socket.split();
+    let sender = Arc::new(Mutex::new(sender));
 
-    let register_line = reader
-        .next()
-        .await
-        .ok_or_else(|| anyhow::anyhow!("{addr} disconnected before register"))??;
+    let register_line = loop {
+        match receiver.next().await {
+            Some(Ok(WsMessage::Text(text))) => break text,
+            Some(Ok(WsMessage::Binary(_))) => continue,
+            Some(Ok(WsMessage::Ping(payload))) => {
+                let _ = sender.lock().await.send(WsMessage::Pong(payload)).await;
+            }
+            Some(Ok(WsMessage::Pong(_))) => {}
+            Some(Ok(WsMessage::Close(_))) | None => {
+                anyhow::bail!("connection closed before register")
+            }
+            Some(Err(err)) => return Err(err.into()),
+        }
+    };
+
     let register_msg: ClientToServer = serde_json::from_str(&register_line)?;
-
     let (local_port, requested_subdomain) = match register_msg {
         ClientToServer::Register {
             local_port,
@@ -171,19 +238,30 @@ async fn handle_buoy(stream: TcpStream, addr: SocketAddr, state: Arc<AppState>) 
         hostname: hostname.clone(),
         sender: tx.clone(),
         pending: pending.clone(),
+        ip_address: ip_address.clone(),
     });
 
     state.insert_tunnel(slug.clone(), handle.clone()).await;
-    println!("Buoy registered: {addr} -> {hostname} (local {local_port})");
+    println!("Buoy registered: {ip_address} -> {hostname} (local {local_port})");
 
-    // Writer task
-    let mut writer = writer;
+    let _ = tx
+        .send(ServerToClient::Registered {
+            hostname: hostname.clone(),
+        })
+        .await;
+
+    let writer_sender = sender.clone();
     let writer_task = tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {
-            let line = serde_json::to_string(&msg);
-            match line {
+            match serde_json::to_string(&msg) {
                 Ok(line) => {
-                    if writer.send(line).await.is_err() {
+                    if writer_sender
+                        .lock()
+                        .await
+                        .send(WsMessage::Text(line))
+                        .await
+                        .is_err()
+                    {
                         break;
                     }
                 }
@@ -195,53 +273,50 @@ async fn handle_buoy(stream: TcpStream, addr: SocketAddr, state: Arc<AppState>) 
         }
     });
 
-    // Send registration ack
-    tx.send(ServerToClient::Registered {
-        hostname: hostname.clone(),
-    })
-    .await
-    .ok();
-
     let pending_clone = pending.clone();
     let state_clone = state.clone();
     let slug_clone = slug.clone();
     let reader_task = tokio::spawn(async move {
-        while let Some(line) = reader.next().await {
-            let line = match line {
-                Ok(line) => line,
+        while let Some(frame) = receiver.next().await {
+            match frame {
+                Ok(WsMessage::Text(text)) => match serde_json::from_str::<ClientToServer>(&text) {
+                    Ok(ClientToServer::ForwardResponse {
+                        request_id,
+                        status,
+                        headers,
+                        body,
+                    }) => {
+                        let decoded = match general_purpose::STANDARD.decode(body) {
+                            Ok(bytes) => bytes,
+                            Err(err) => {
+                                eprintln!("invalid base64 body: {err:?}");
+                                continue;
+                            }
+                        };
+                        if let Some(tx) = pending_clone.lock().await.remove(&request_id) {
+                            let _ = tx.send(ForwardedResponse {
+                                status,
+                                headers,
+                                body: decoded,
+                            });
+                        }
+                    }
+                    Ok(ClientToServer::Register { .. }) => {
+                        eprintln!("buoy attempted to re-register; ignoring");
+                    }
+                    Err(err) => {
+                        eprintln!("invalid message from buoy: {err:?}");
+                    }
+                },
+                Ok(WsMessage::Ping(payload)) => {
+                    let _ = sender.lock().await.send(WsMessage::Pong(payload)).await;
+                }
+                Ok(WsMessage::Pong(_)) => {}
+                Ok(WsMessage::Binary(_)) => {}
+                Ok(WsMessage::Close(_)) => break,
                 Err(err) => {
                     eprintln!("reader error: {err:?}");
                     break;
-                }
-            };
-
-            match serde_json::from_str::<ClientToServer>(&line) {
-                Ok(ClientToServer::ForwardResponse {
-                    request_id,
-                    status,
-                    headers,
-                    body,
-                }) => {
-                    let decoded = match general_purpose::STANDARD.decode(body) {
-                        Ok(bytes) => bytes,
-                        Err(err) => {
-                            eprintln!("invalid base64 body: {err:?}");
-                            continue;
-                        }
-                    };
-                    if let Some(tx) = pending_clone.lock().await.remove(&request_id) {
-                        let _ = tx.send(ForwardedResponse {
-                            status,
-                            headers,
-                            body: decoded,
-                        });
-                    }
-                }
-                Ok(ClientToServer::Register { .. }) => {
-                    eprintln!("buoy attempted to re-register; ignoring");
-                }
-                Err(err) => {
-                    eprintln!("invalid message from buoy: {err:?}");
                 }
             }
         }
@@ -351,6 +426,7 @@ struct TunnelHandle {
     hostname: String,
     sender: mpsc::Sender<ServerToClient>,
     pending: Arc<Mutex<HashMap<String, oneshot::Sender<ForwardedResponse>>>>,
+    ip_address: String,
 }
 
 struct ForwardedResponse {

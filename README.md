@@ -20,13 +20,13 @@ Rust workspace with two binaries:
 
 3. Start a buoy that points at that service:
    ```bash
-   cargo run -p buoy -- --port 3000 --bay-addr 127.0.0.1:7000
+   cargo run -p buoy -- --port 3000 --control-url ws://127.0.0.1:7070/control
    ```
    The buoy prints the public hostname (e.g., `abc123.bay.localhost`). Any HTTP request that hits the bay with `Host: abc123.bay.localhost` will be forwarded to `http://127.0.0.1:3000`.
 
    Environment variables can replace the flags if you prefer:
    ```
-   export TUNNELBAY_BAY_ADDR=10.0.0.2:7000
+   export TUNNELBAY_CONTROL_URL=wss://bay.apps.timvw.be/control
    export TUNNELBAY_LOCAL_PORT=4000
    export TUNNELBAY_SUBDOMAIN=my-app
    cargo run -p buoy
@@ -58,3 +58,22 @@ The workflow `.github/workflows/release-images.yaml` runs the same builds on tag
 4. Buoy replays the request against the local service and ships the response back to bay, which then returns it to the original HTTP client.
 
 TLS termination, auth, and multi-tenant policies are intentionally out of scope for this first cut; you can place bay behind Traefik or another ingress to add HTTPS.
+
+### Configuring bay via environment variables
+
+`bay` accepts these environment variables (defaults in parentheses):
+
+| Variable | Description |
+| --- | --- |
+| `BAY_DOMAIN` (`bay.localhost`) | Base domain used when advertising hostnames to buoys. For example, use `bay.apps.timvw.be` so public URLs look like `*.bay.apps.timvw.be`. |
+| `BAY_HTTP_ADDR` (`0.0.0.0:8080`) | Address the HTTP listener should bind to inside the container. |
+| `BAY_CONTROL_ADDR` (`0.0.0.0:7000`) | Address for buoy control connections (plain TCP). |
+
+Example:
+
+```bash
+BAY_DOMAIN=bay.apps.timvw.be \
+BAY_HTTP_ADDR=0.0.0.0:8080 \
+BAY_CONTROL_ADDR=0.0.0.0:7000 \
+bay
+```
