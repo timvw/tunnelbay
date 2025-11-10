@@ -1,13 +1,13 @@
-use anyhow::{Context, Result, anyhow};
-use base64::{Engine as _, engine::general_purpose};
+use anyhow::{anyhow, Context, Result};
+use base64::{engine::general_purpose, Engine as _};
 use clap::Parser;
 use futures::{SinkExt, StreamExt};
 use proto::{ClientToServer, Header, ServerToClient};
 use reqwest::{
-    Client as HttpClient, Method,
     header::{HeaderName, HeaderValue},
+    Client as HttpClient, Method,
 };
-use tokio::net::{TcpStream, tcp::OwnedReadHalf};
+use tokio::net::{tcp::OwnedReadHalf, TcpStream};
 use tokio_util::codec::{FramedRead, FramedWrite, LinesCodec};
 
 #[derive(Parser, Debug)]

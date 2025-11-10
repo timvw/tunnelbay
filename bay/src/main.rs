@@ -2,19 +2,19 @@ use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
 
 use anyhow::Result;
 use axum::{
-    Router,
-    body::{Body, to_bytes},
+    body::{to_bytes, Body},
     extract::{Host, State},
     http::{Request, Response, StatusCode},
     routing::any,
+    Router,
 };
-use base64::{Engine as _, engine::general_purpose};
+use base64::{engine::general_purpose, Engine as _};
 use futures::{SinkExt, StreamExt};
 use proto::{ClientToServer, Header, ServerToClient};
-use rand::{Rng, distributions::Alphanumeric};
+use rand::{distributions::Alphanumeric, Rng};
 use tokio::{
     net::{TcpListener, TcpStream},
-    sync::{Mutex, RwLock, mpsc, oneshot},
+    sync::{mpsc, oneshot, Mutex, RwLock},
 };
 use tokio_util::codec::{FramedRead, FramedWrite, LinesCodec};
 use uuid::Uuid;
