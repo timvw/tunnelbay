@@ -40,14 +40,16 @@ async fn main() -> Result<()> {
     let control_addr = settings.control_addr.clone();
 
     let http_task = tokio::spawn(async move {
-        if let Err(err) = run_http_server(http_state, http_addr).await {
-            eprintln!("http server error: {err:?}");
+        match run_http_server(http_state, http_addr).await {
+            Ok(()) => eprintln!("HTTP server stopped"),
+            Err(err) => eprintln!("HTTP server error: {err:?}"),
         }
     });
 
     let ctrl_task = tokio::spawn(async move {
-        if let Err(err) = run_control_server(ctrl_state, control_addr).await {
-            eprintln!("control listener error: {err:?}");
+        match run_control_server(ctrl_state, control_addr).await {
+            Ok(()) => eprintln!("Control server stopped"),
+            Err(err) => eprintln!("Control server error: {err:?}"),
         }
     });
 

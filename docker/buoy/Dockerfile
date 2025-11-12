@@ -14,13 +14,6 @@ RUN apt-get update && \
     ln -sf /usr/bin/musl-gcc /usr/bin/x86_64-unknown-linux-musl-gcc && \
     rm -rf /var/lib/apt/lists/*
 
-RUN mkdir -p proto/src buoy/src bay/src && \
-    echo 'pub fn stub() {}' > proto/src/lib.rs && \
-    echo 'fn main() {}' > buoy/src/main.rs && \
-    echo 'fn main() {}' > bay/src/main.rs && \
-    cargo build --release -p buoy --target x86_64-unknown-linux-musl
-
-RUN rm -rf proto/src buoy/src bay/src
 COPY . .
 RUN cargo build --release -p buoy --target x86_64-unknown-linux-musl
 
