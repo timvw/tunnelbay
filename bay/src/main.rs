@@ -1,6 +1,10 @@
 use std::{collections::HashMap, env, net::SocketAddr, sync::Arc, time::Duration};
 
-use anyhow::Result;
+mod auth;
+
+use auth::{AuthContext, AuthError, AuthManager, OidcConfig};
+
+use anyhow::{Context, Result};
 use axum::{
     body::{to_bytes, Body},
     extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade},
@@ -28,12 +32,15 @@ const MAX_REQUEST_BYTES: usize = 2 * 1024 * 1024; // 2 MiB
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let settings = Settings::from_env();
+    let settings = Settings::from_env()?;
     println!(
         "Starting TunnelBay with domain {} (HTTP {}, control {})",
         settings.domain, settings.http_addr, settings.control_addr
     );
-    let state = Arc::new(AppState::new(settings.domain.clone()));
+    let state = Arc::new(AppState::new(
+        settings.domain.clone(),
+        settings.auth.clone(),
+    ));
 
     let http_state = state.clone();
     let ctrl_state = state.clone();
@@ -180,39 +187,109 @@ async fn control_ws_handler(
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| addr.ip().to_string());
+    let auth_header = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok());
 
-    ws.on_upgrade(move |socket| {
-        let state = state.clone();
-        async move {
-            if let Err(err) = handle_buoy_ws(socket, state, source_ip).await {
-                eprintln!("buoy connection closed: {err:?}");
+    match state.authenticate(auth_header).await {
+        Ok(auth_ctx) => {
+            let state = state.clone();
+            let ip = source_ip.clone();
+            ws.on_upgrade(move |socket| {
+                let state = state.clone();
+                let auth_ctx = auth_ctx.clone();
+                let ip = ip.clone();
+                async move {
+                    if let Err(err) = handle_buoy_ws(socket, state, ip, auth_ctx).await {
+                        eprintln!("buoy connection closed: {err:?}");
+                    }
+                }
+            })
+        }
+        Err(err) => {
+            eprintln!("Rejected control connection from {source_ip}: {err}");
+            match err {
+                AuthError::MissingCredentials | AuthError::InvalidToken(_) => {
+                    (StatusCode::UNAUTHORIZED, "Missing or invalid bearer token").into_response()
+                }
+                AuthError::Forbidden(_) => (
+                    StatusCode::FORBIDDEN,
+                    "The provided token is not allowed to register buoys",
+                )
+                    .into_response(),
+                AuthError::Configuration(_) => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Authentication is temporarily unavailable",
+                )
+                    .into_response(),
             }
         }
-    })
+    }
 }
 
 struct Settings {
     domain: String,
     control_addr: String,
     http_addr: String,
+    auth: AuthManager,
 }
 
 impl Settings {
-    fn from_env() -> Self {
+    fn from_env() -> Result<Self> {
         let domain = env::var("BAY_DOMAIN").unwrap_or_else(|_| DEFAULT_DOMAIN.to_string());
         let control_addr =
             env::var("BAY_CONTROL_ADDR").unwrap_or_else(|_| DEFAULT_CONTROL_ADDR.to_string());
         let http_addr = env::var("BAY_HTTP_ADDR").unwrap_or_else(|_| DEFAULT_HTTP_ADDR.to_string());
+        let auth = auth_from_env()?;
 
-        Self {
+        Ok(Self {
             domain,
             control_addr,
             http_addr,
-        }
+            auth,
+        })
     }
 }
 
-async fn handle_buoy_ws(socket: WebSocket, state: Arc<AppState>, ip_address: String) -> Result<()> {
+fn auth_from_env() -> Result<AuthManager> {
+    let mode = env::var("BAY_AUTH_MODE").unwrap_or_else(|_| "disabled".into());
+    match mode.to_lowercase().as_str() {
+        "disabled" => Ok(AuthManager::disabled()),
+        "oidc" => {
+            let jwks_url = env::var("BAY_AUTH_JWKS_URL")
+                .context("BAY_AUTH_JWKS_URL must be set when BAY_AUTH_MODE=oidc")?;
+            let audience = env::var("BAY_AUTH_AUDIENCE").ok();
+            let issuer = env::var("BAY_AUTH_ISSUER").ok();
+            let required_scopes = env::var("BAY_AUTH_REQUIRED_SCOPES")
+                .unwrap_or_default()
+                .split(',')
+                .map(|scope| scope.trim().to_string())
+                .filter(|scope| !scope.is_empty())
+                .collect::<Vec<_>>();
+            let cache_secs = env::var("BAY_AUTH_JWKS_CACHE_SECS")
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or(300);
+
+            AuthManager::oidc(OidcConfig {
+                jwks_url,
+                audience,
+                issuer,
+                required_scopes,
+                cache_ttl: Duration::from_secs(cache_secs),
+            })
+            .context("failed to initialize OIDC authentication")
+        }
+        other => anyhow::bail!("unsupported BAY_AUTH_MODE '{other}'"),
+    }
+}
+
+async fn handle_buoy_ws(
+    socket: WebSocket,
+    state: Arc<AppState>,
+    ip_address: String,
+    auth: AuthContext,
+) -> Result<()> {
     let (sender, mut receiver) = socket.split();
     let sender = Arc::new(Mutex::new(sender));
 
@@ -254,10 +331,15 @@ async fn handle_buoy_ws(socket: WebSocket, state: Arc<AppState>, ip_address: Str
         sender: tx.clone(),
         pending: pending.clone(),
         ip_address: ip_address.clone(),
+        owner: auth.clone(),
     });
 
     state.insert_tunnel(slug.clone(), handle.clone()).await;
-    println!("Buoy registered: {ip_address} -> {hostname} (local {local_port})");
+    let display_name = auth.email.as_deref().unwrap_or(auth.subject.as_str());
+    println!(
+        "Buoy registered: user {display_name} (sub {}) from {ip_address} -> {hostname} (local {local_port})",
+        auth.subject
+    );
 
     let _ = tx
         .send(ServerToClient::Registered {
@@ -343,6 +425,12 @@ async fn handle_buoy_ws(socket: WebSocket, state: Arc<AppState>, ip_address: Str
         _ = reader_task => {}
     }
 
+    let disconnect_name = auth.email.as_deref().unwrap_or(auth.subject.as_str());
+    println!(
+        "Buoy disconnected: user {disconnect_name} (sub {}) from {ip_address} -> {hostname}",
+        auth.subject
+    );
+
     Ok(())
 }
 
@@ -386,13 +474,15 @@ fn random_slug() -> String {
 struct AppState {
     domain: String,
     tunnels: RwLock<HashMap<String, Arc<TunnelHandle>>>,
+    auth: AuthManager,
 }
 
 impl AppState {
-    fn new(domain: String) -> Self {
+    fn new(domain: String, auth: AuthManager) -> Self {
         Self {
             domain,
             tunnels: RwLock::new(HashMap::new()),
+            auth,
         }
     }
 
@@ -430,6 +520,10 @@ impl AppState {
     async fn get_tunnel(&self, slug: &str) -> Option<Arc<TunnelHandle>> {
         self.tunnels.read().await.get(slug).cloned()
     }
+
+    async fn authenticate(&self, header: Option<&str>) -> Result<AuthContext, AuthError> {
+        self.auth.authenticate(header).await
+    }
 }
 
 struct TunnelHandle {
@@ -438,6 +532,8 @@ struct TunnelHandle {
     sender: mpsc::Sender<ServerToClient>,
     pending: Arc<Mutex<HashMap<String, oneshot::Sender<ForwardedResponse>>>>,
     ip_address: String,
+    #[allow(dead_code)]
+    owner: AuthContext,
 }
 
 struct ForwardedResponse {
