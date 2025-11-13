@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 anyhow = "1"
 axum = { version = "0.8", features = ["ws"] }
+axum-extra = "0.12"
 base64 = "0.22"
 futures = "0.3"
 http = "1"
