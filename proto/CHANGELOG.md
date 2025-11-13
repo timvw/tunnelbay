@@ -7,13 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.7.1](https://github.com/timvw/tunnelbay/compare/proto-v0.7.0...proto-v0.7.1) - 2025-11-13
+## [0.8.0](https://github.com/timvw/tunnelbay/compare/proto-v0.7.0...proto-v0.8.0) - 2025-11-13
 
 ### Added
 
-- initial tunnelbay prototype
-
-### Other
-
-- bump crate versions to 0.7.0
-- add container workflow and env overrides
+- OAuth 2.0 device authorization flow for buoy, including CLI prompts and token injection into the websocket handshake
+- Control-plane enforcement that requires buoy registrations to present OAuth tokens (docs now include Authentik setup)
