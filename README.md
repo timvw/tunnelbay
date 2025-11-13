@@ -43,7 +43,7 @@ sequenceDiagram
     Bay-->>Client: Public HTTP response
 ```
 
-From the end-user’s perspective they just load the shared URL; behind the scenes TunnelBay is acting like a programmable reverse proxy that bridges public traffic to your private network without needing any inbound connectivity.
+From the end-user’s perspective they just load the shared URL; behind the scenes TunnelBay is acting like a programmable reverse proxy that bridges public traffic to your private network without needing any inbound connectivity. For a deeper look at how HTTPS traffic flows through Traefik and Flux-managed infrastructure, see the [Kubernetes deployment guide](docs/kubernetes-deployment.md#request-flow).
 
 ## Components at a glance
 
