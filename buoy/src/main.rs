@@ -491,11 +491,7 @@ mod tests {
     fn load_token_from_file_reads_trimmed_contents() {
         let mut file = NamedTempFile::new().expect("temp file");
         use std::io::Write;
-        file.write_all(
-            b"secret-token
-",
-        )
-        .unwrap();
+        file.write_all(b"secret-token\n").unwrap();
         let token = load_token_from_file(&file.path().to_path_buf()).unwrap();
         assert_eq!(token, "secret-token");
     }
