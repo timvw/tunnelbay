@@ -2,6 +2,7 @@
 name = "buoy"
 version = "0.8.0"
 edition = "2021"
+publish = ["tunnelbay-private"]
 
 [dependencies]
 anyhow = "1"
