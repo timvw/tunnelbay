@@ -15,14 +15,14 @@ This guide documents how we run the `bay` relay on a Kubernetes cluster that is 
 graph LR
     subgraph GitOps
         repo[(tunnelbay repo)]
-        flux[Flux Kustomization\n(k8s/clusters/kubernetes/bay)]
+        flux["Flux Kustomization<br/>(k8s/clusters/kubernetes/bay)"]
         repo -->|git commit| flux
     end
 
     subgraph Cluster
-        traefik[Traefik\nweb/websecure]
-        svc[Service bay\n8080/7070]
-        deploy[Deployment bay\nghcr.io/timvw/... ]
+        traefik["Traefik<br/>web/websecure"]
+        svc["Service bay<br/>8080/7070"]
+        deploy["Deployment bay<br/>ghcr.io/timvw/... "]
         externaldns[external-dns]
         traefik --> svc --> deploy
         flux --> deploy
@@ -33,7 +33,7 @@ graph LR
     subgraph PublicInternet
         client[Client browser/webhook]
         dns[(Route53 zone)]
-        buoy[Developer buoy\nOutbound WS]
+        buoy["Developer buoy<br/>Outbound WS"]
     end
 
     client -->|HTTPS slug.bay.apps.timvw.be| traefik
