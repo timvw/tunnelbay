@@ -177,7 +177,7 @@ async fn forward_to_local(
     let response_body = response.bytes().await?;
     let encoded_body = general_purpose::STANDARD.encode(response_body);
 
-Ok(ClientToServer::ForwardResponse {
+    Ok(ClientToServer::ForwardResponse {
         request_id,
         status,
         headers: response_headers,
