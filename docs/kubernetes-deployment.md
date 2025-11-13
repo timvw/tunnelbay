@@ -9,42 +9,6 @@ This guide documents how we run the `bay` relay on a Kubernetes cluster that is 
 - Traefik installed in front of the cluster. external-dns is optional—use it only if you want DNS records managed automatically; otherwise keep using the Terraform flow described later.
 - Control over the DNS zone that backs `BAY_DOMAIN` (for example `bay.apps.timvw.be`).
 
-### Infrastructure topology
-
-```mermaid
-graph LR
-    subgraph GitOps
-        repo[(tunnelbay repo)]
-        flux["Flux Kustomization<br/>(k8s/clusters/kubernetes/bay)"]
-        repo -->|git commit| flux
-    end
-
-    subgraph Cluster
-        traefik["Traefik<br/>web/websecure"]
-        svc["Service bay<br/>8080/7070"]
-        deploy["Deployment bay<br/>ghcr.io/timvw/... "]
-        externaldns[external-dns]
-        traefik --> svc --> deploy
-        flux --> deploy
-        flux --> traefik
-        flux --> externaldns
-    end
-
-    subgraph PublicInternet
-        client[Client browser/webhook]
-        dns[(Route53 zone)]
-        buoy["Developer buoy<br/>Outbound WS"]
-    end
-
-    client -->|HTTPS slug.bay.apps.timvw.be| traefik
-    buoy -->|wss://bay.apps.timvw.be/control| traefik
-    externaldns -->|wildcard + apex| dns
-    dns --> client
-```
-
-Flux keeps the manifests in sync, Traefik terminates TLS and forwards both public HTTP traffic and WebSocket control connections to the `bay` Deployment, while external-dns (or Terraform) ensures the wildcard DNS records resolve to the Traefik load balancer.
-
-
 ## 1. GitOps layout (Flux-friendly)
 
 All manifests for the relay live in `k8s/clusters/kubernetes/bay/` and follow the same structure whether Flux applies them or you run `kubectl apply -k` manually:
