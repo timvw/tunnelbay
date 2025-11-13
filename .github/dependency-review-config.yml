@@ -8,4 +8,5 @@ allow-licenses:
   - ISC
   - Unicode-DFS-2016
   - MPL-2.0
+  - LGPL-3.0
 comment-summary-in-pr: always

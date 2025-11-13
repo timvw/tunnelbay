@@ -41,7 +41,7 @@ async fn main() -> Result<()> {
         requested_subdomain: args.subdomain.clone(),
     };
     ws_writer
-        .send(WsMessage::Text(serde_json::to_string(&register)?))
+        .send(text_message(serde_json::to_string(&register)?))
         .await
         .context("failed to send register message")?;
 
@@ -97,7 +97,7 @@ async fn main() -> Result<()> {
                 };
 
                 let line = serde_json::to_string(&response)?;
-                if ws_writer.send(WsMessage::Text(line)).await.is_err() {
+                if ws_writer.send(text_message(line)).await.is_err() {
                     break;
                 }
             }
@@ -183,6 +183,13 @@ async fn forward_to_local(
         headers: response_headers,
         body: encoded_body,
     })
+}
+
+fn text_message(payload: String) -> WsMessage {
+    #[allow(clippy::useless_conversion)]
+    {
+        WsMessage::Text(payload.into())
+    }
 }
 
 fn build_error_response(request_id: String) -> ClientToServer {
