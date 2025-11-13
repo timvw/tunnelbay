@@ -8,13 +8,7 @@ repository:
   name: tunnelbay
   description: Share localhost services safely via outbound-only tunnels with bay/buoy
   homepage: https://github.com/timvw/tunnelbay
-  topics:
-    - tunnels
-    - reverse-proxy
-    - localhost
-    - networking
-    - developer-tools
-    - rust
+  topics: tunnels, reverse-proxy, localhost, networking, developer-tools, rust
 
   # Repository settings
   private: false
