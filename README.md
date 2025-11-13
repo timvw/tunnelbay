@@ -16,7 +16,7 @@ Rust workspace with two binaries:
 ## Request flow
 
 1. You start a buoy beside your local service. It stores the port it needs to hit (for example `3000`) and establishes a single outbound WebSocket to the bay’s `/control` endpoint.
-2. Bay acknowledges the connection, hands out a hostname such as `abc123.bay.localhost`, and keeps that slug → buoy mapping in memory. This is the link you share with your testers or webhook providers.
+2. Bay acknowledges the connection, hands out a hostname such as `abc123.127.0.0.1.sslip.io`, and keeps that slug → buoy mapping in memory. This is the link you share with your testers or webhook providers.
 3. When an external client sends an HTTP request to that hostname, bay terminates the TCP/TLS connection, packages the request (method, headers, and body) as JSON, and streams it over the existing WebSocket to the buoy.
 4. The buoy replays the request against `http://127.0.0.1:<local_port>`, captures the response, and ferries it back over the WebSocket.
 5. Bay unwraps the response, writes it back to the original client, and logs timing information so you can observe tunnel health.
@@ -34,8 +34,8 @@ sequenceDiagram
     Dev->>Bay: Launch cargo run -p bay
     Dev->>Buoy: Start buoy with control URL + local port
     Buoy->>Bay: register(local_port, requested slug)
-    Bay-->>Buoy: registered slug.bay.localhost
-    Client->>Bay: HTTPS Host: slug.bay.localhost
+    Bay-->>Buoy: registered slug.127.0.0.1.sslip.io
+    Client->>Bay: HTTPS Host: slug.127.0.0.1.sslip.io
     Bay->>Buoy: forward_request JSON
     Buoy->>App: HTTP replay to localhost
     App-->>Buoy: HTTP response
@@ -73,7 +73,7 @@ From the end-user’s perspective they just load the shared URL; behind the scen
    ```bash
    cargo run -p buoy -- --port 3000 --control-url ws://127.0.0.1:7070/control
    ```
-   The buoy prints the public hostname (e.g., `abc123.bay.localhost`). Any HTTP request that hits the bay with `Host: abc123.bay.localhost` will be forwarded to `http://127.0.0.1:3000`.
+   The buoy prints the public hostname (e.g., `abc123.127.0.0.1.sslip.io`). Any HTTP request that hits the bay with `Host: abc123.127.0.0.1.sslip.io` will be forwarded to `http://127.0.0.1:3000`.
 
    Environment variables can replace the flags if you prefer:
    ```
@@ -86,7 +86,7 @@ From the end-user’s perspective they just load the shared URL; behind the scen
 
 4. Hit the tunnel from another terminal using curl:
    ```bash
-   curl -H "Host: abc123.bay.localhost" http://127.0.0.1:8080
+   curl -H "Host: abc123.127.0.0.1.sslip.io" http://127.0.0.1:8080
    ```
    Replace `abc123` with the slug the buoy printed. You should see the content served by your local HTTP server.
 
@@ -133,7 +133,7 @@ TLS termination, auth, and multi-tenant policies are intentionally out of scope 
 
 | Variable | Description |
 | --- | --- |
-| `BAY_DOMAIN` (`bay.localhost`) | Base domain used when advertising hostnames to buoys. For example, use `bay.apps.timvw.be` so public URLs look like `*.bay.apps.timvw.be`. |
+| `BAY_DOMAIN` (`127.0.0.1.sslip.io`) | Base domain used when advertising hostnames to buoys. For example, use `bay.apps.timvw.be` so public URLs look like `*.bay.apps.timvw.be`. |
 | `BAY_HTTP_ADDR` (`0.0.0.0:8080`) | Address the HTTP listener should bind to inside the container. |
 | `BAY_CONTROL_ADDR` (`0.0.0.0:7070`) | Address for buoy control connections (plain TCP / WebSocket `/control`). |
 | `BAY_AUTH_MODE` (`disabled`) | Set to `oidc` to require `Authorization: Bearer <token>` during buoy registration. |
