@@ -109,20 +109,6 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Prepare released manifest snapshot
-        id: release-registry-manifest
-        run: |
-          set -euo pipefail
-          latest_tag="$(git tag --list 'v*' --sort=-version:refname | head -n 1)"
-          if [ -n "$latest_tag" ]; then
-            echo "Using latest release tag: $latest_tag"
-            git worktree add /tmp/released "$latest_tag"
-            echo "registry_manifest_path=/tmp/released/Cargo.toml" >> "$GITHUB_OUTPUT"
-          else
-            echo "No release tags detected; falling back to registry lookup."
-            echo "registry_manifest_path=" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
@@ -147,19 +133,12 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ steps.release-app-token.outputs.token }}
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-          REGISTRY_MANIFEST_PATH: ${{ steps.release-registry-manifest.outputs.registry_manifest_path }}
         run: |
           set -euo pipefail
-          args=()
-          if [ -n "${REGISTRY_MANIFEST_PATH}" ]; then
-            args+=(--registry-manifest-path "${REGISTRY_MANIFEST_PATH}")
-          fi
-
           release-plz release \
             --git-token "${GITHUB_TOKEN}" \
             --repo-url "https://github.com/${GITHUB_REPOSITORY}" \
-            -o json \
-            "${args[@]}"
+            -o json
 
       - name: Assert release App token present
         run: |
