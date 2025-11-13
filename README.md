@@ -70,11 +70,11 @@ Rust workspace with two binaries:
 
 ```mermaid
 sequenceDiagram
-    participant Dev as Developer
+    participant Dev as developer
     participant Bay as bay relay
-    participant Buoy
-    participant App as Local app (127.0.0.1:PORT)
-    participant Client
+    participant Buoy as buoy client
+    participant App as local app (127.0.0.1:PORT)
+    participant Client as public client
 
     Dev->>Bay: Launch cargo run -p bay
     Dev->>Buoy: Start buoy with control URL + local port
