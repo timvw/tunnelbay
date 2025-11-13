@@ -25,7 +25,7 @@ use tokio::{
 };
 use uuid::Uuid;
 
-const DEFAULT_DOMAIN: &str = "bay.localhost";
+const DEFAULT_DOMAIN: &str = "127.0.0.1.sslip.io";
 const DEFAULT_CONTROL_ADDR: &str = "0.0.0.0:7070";
 const DEFAULT_HTTP_ADDR: &str = "0.0.0.0:8080";
 const MAX_REQUEST_BYTES: usize = 2 * 1024 * 1024; // 2 MiB
