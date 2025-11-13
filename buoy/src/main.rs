@@ -450,3 +450,177 @@ async fn run_device_flow(config: &DeviceFlowConfig) -> Result<String> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use base64::engine::general_purpose;
+    use hyper014::body::to_bytes;
+    use hyper014::service::{make_service_fn, service_fn};
+    use hyper014::{Body, Request as HyperRequest, Response as HyperResponse, Server, StatusCode};
+    use std::convert::Infallible;
+    use std::net::TcpListener;
+    use std::sync::Arc;
+    use tempfile::NamedTempFile;
+    use tokio::sync::{oneshot, Mutex};
+
+    #[test]
+    fn build_error_response_encodes_payload() {
+        let message = build_error_response("req-123".into());
+        match message {
+            ClientToServer::ForwardResponse {
+                request_id,
+                status,
+                headers,
+                body,
+            } => {
+                assert_eq!(request_id, "req-123");
+                assert_eq!(status, 502);
+                assert!(headers
+                    .iter()
+                    .any(|h| h.name == "content-type" && h.value == "text/plain"));
+                let decoded =
+                    String::from_utf8(general_purpose::STANDARD.decode(body).unwrap()).unwrap();
+                assert_eq!(decoded, "Internal buoy error");
+            }
+            _ => panic!("unexpected message variant"),
+        }
+    }
+
+    #[test]
+    fn load_token_from_file_reads_trimmed_contents() {
+        let mut file = NamedTempFile::new().expect("temp file");
+        use std::io::Write;
+        file.write_all(
+            b"secret-token
+",
+        )
+        .unwrap();
+        let token = load_token_from_file(&file.path().to_path_buf()).unwrap();
+        assert_eq!(token, "secret-token");
+    }
+
+    #[tokio::test]
+    async fn forward_to_local_replays_request_to_local_server() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+        let (capture_tx, capture_rx) = oneshot::channel::<CapturedRequest>();
+        let capture = Arc::new(Mutex::new(Some(capture_tx)));
+
+        let server = Server::from_tcp(listener)
+            .unwrap()
+            .serve(make_service_fn(move |_| {
+                let capture = capture.clone();
+                async move {
+                    Ok::<_, Infallible>(service_fn(move |req: HyperRequest<Body>| {
+                        let capture = capture.clone();
+                        async move {
+                            let (parts, body) = req.into_parts();
+                            let body_bytes = to_bytes(body).await.unwrap().to_vec();
+                            let headers = parts
+                                .headers
+                                .iter()
+                                .map(|(name, value)| {
+                                    (
+                                        name.as_str().to_string(),
+                                        value.to_str().unwrap().to_string(),
+                                    )
+                                })
+                                .collect();
+                            if let Some(sender) = capture.lock().await.take() {
+                                let _ = sender.send(CapturedRequest {
+                                    method: parts.method.to_string(),
+                                    uri: parts.uri.to_string(),
+                                    headers,
+                                    body: body_bytes,
+                                });
+                            }
+                            let response = HyperResponse::builder()
+                                .status(StatusCode::CREATED)
+                                .header("content-type", "text/plain")
+                                .body(Body::from("pong"))
+                                .unwrap();
+                            Ok::<_, Infallible>(response)
+                        }
+                    }))
+                }
+            }))
+            .with_graceful_shutdown(async move {
+                let _ = shutdown_rx.await;
+            });
+
+        let server_handle = tokio::spawn(server);
+
+        let client = HttpClient::new();
+        let headers = vec![
+            Header {
+                name: "host".into(),
+                value: "example.com".into(),
+            },
+            Header {
+                name: "x-test".into(),
+                value: "123".into(),
+            },
+        ];
+        let body = general_purpose::STANDARD.encode("ping");
+
+        let response = forward_to_local(
+            &client,
+            port,
+            "req-1".into(),
+            "POST".into(),
+            "/echo?foo=bar".into(),
+            headers,
+            body,
+        )
+        .await
+        .expect("forward succeeds");
+
+        let captured = capture_rx.await.expect("captured request");
+        assert_eq!(captured.method, "POST");
+        assert_eq!(captured.uri, "/echo?foo=bar");
+        assert_eq!(captured.body, b"ping");
+
+        let host_header = captured
+            .headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("host"))
+            .expect("host header present");
+        assert_eq!(host_header.1, format!("127.0.0.1:{port}"));
+        assert!(captured
+            .headers
+            .iter()
+            .any(|(name, value)| name.eq_ignore_ascii_case("x-test") && value == "123"));
+
+        match response {
+            ClientToServer::ForwardResponse {
+                request_id,
+                status,
+                headers,
+                body,
+            } => {
+                assert_eq!(request_id, "req-1");
+                assert_eq!(status, StatusCode::CREATED.as_u16());
+                assert!(headers
+                    .iter()
+                    .any(|h| h.name == "content-type" && h.value == "text/plain"));
+                let decoded = general_purpose::STANDARD.decode(body).unwrap();
+                assert_eq!(decoded, b"pong");
+            }
+            _ => panic!("expected forward response"),
+        }
+
+        let _ = shutdown_tx.send(());
+        let _ = server_handle.await.unwrap();
+    }
+
+    struct CapturedRequest {
+        method: String,
+        uri: String,
+        headers: Vec<(String, String)>,
+        body: Vec<u8>,
+    }
+}

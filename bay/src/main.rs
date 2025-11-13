@@ -541,3 +541,91 @@ struct ForwardedResponse {
     headers: Vec<Header>,
     body: Vec<u8>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::to_bytes;
+    use axum::http::header::HeaderValue;
+    use axum::http::HeaderMap;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use tokio::sync::{mpsc, Mutex};
+
+    #[test]
+    fn extract_slug_parses_basic_host() {
+        assert_eq!(extract_slug("alpha.bay.localhost"), Some("alpha"));
+    }
+
+    #[test]
+    fn extract_slug_ignores_port() {
+        assert_eq!(extract_slug("bravo.bay.localhost:8080"), Some("bravo"));
+    }
+
+    #[test]
+    fn extract_slug_rejects_empty() {
+        assert_eq!(extract_slug(".bay.localhost"), None);
+    }
+
+    #[test]
+    fn header_map_to_proto_copies_headers() {
+        let mut map = HeaderMap::new();
+        map.insert("content-type", HeaderValue::from_static("text/plain"));
+        map.insert("x-custom", HeaderValue::from_static("42"));
+
+        let headers = header_map_to_proto(&map);
+        assert_eq!(headers.len(), 2);
+        assert!(headers
+            .iter()
+            .any(|h| h.name == "content-type" && h.value == "text/plain"));
+        assert!(headers
+            .iter()
+            .any(|h| h.name == "x-custom" && h.value == "42"));
+    }
+
+    #[tokio::test]
+    async fn convert_response_preserves_status_headers_and_body() {
+        let forwarded = ForwardedResponse {
+            status: StatusCode::ACCEPTED.as_u16(),
+            headers: vec![Header {
+                name: "content-type".into(),
+                value: "text/plain".into(),
+            }],
+            body: b"ok".to_vec(),
+        };
+
+        let response = convert_response(forwarded).expect("valid response");
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        assert_eq!(
+            response
+                .headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok()),
+            Some("text/plain")
+        );
+        let bytes = to_bytes(response.into_body(), MAX_REQUEST_BYTES)
+            .await
+            .unwrap();
+        assert_eq!(bytes.as_ref(), b"ok");
+    }
+
+    #[tokio::test]
+    async fn app_state_insert_get_remove_round_trip() {
+        let state = AppState::new("bay.test".into(), AuthManager::disabled());
+        assert!(state.get_tunnel("alpha").await.is_none());
+
+        let (tx, _rx) = mpsc::channel(1);
+        let handle = Arc::new(TunnelHandle {
+            hostname: "alpha.bay.test".into(),
+            sender: tx,
+            pending: Arc::new(Mutex::new(HashMap::new())),
+            ip_address: "127.0.0.1".into(),
+            owner: AuthContext::anonymous(),
+        });
+
+        state.insert_tunnel("alpha".into(), handle.clone()).await;
+        assert!(state.get_tunnel("alpha").await.is_some());
+        state.remove_tunnel("alpha").await;
+        assert!(state.get_tunnel("alpha").await.is_none());
+    }
+}
