@@ -28,6 +28,20 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Prepare released manifest snapshot
+        id: registry-manifest
+        run: |
+          set -euo pipefail
+          latest_tag="$(git tag --list 'v*' --sort=-version:refname | head -n 1)"
+          if [ -n "$latest_tag" ]; then
+            echo "Using latest release tag: $latest_tag"
+            git worktree add /tmp/released "$latest_tag"
+            echo "registry_manifest_path=/tmp/released/Cargo.toml" >> "$GITHUB_OUTPUT"
+          else
+            echo "No release tags detected; falling back to registry lookup."
+            echo "registry_manifest_path=" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
@@ -43,6 +57,7 @@ jobs:
         uses: MarcoIeni/release-plz-action@v0.5
         with:
           command: release-pr # skip publishing while crates remain private
+          args: ${{ steps.registry-manifest.outputs.registry_manifest_path != '' && format('--registry-manifest-path {0}', steps.registry-manifest.outputs.registry_manifest_path) || '' }}
         env:
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
