@@ -13,6 +13,38 @@ Rust workspace with two binaries:
 - `bay`: the relay server. It listens for buoy control connections on `0.0.0.0:7070` (WebSocket `/control`) and serves public HTTP traffic on `0.0.0.0:8080`.
 - `buoy`: the client CLI that runs next to your local service, connects out to a bay instance, and proxies requests to a chosen local TCP port.
 
+## Request flow
+
+1. You start a buoy beside your local service. It stores the port it needs to hit (for example `3000`) and establishes a single outbound WebSocket to the bay’s `/control` endpoint.
+2. Bay acknowledges the connection, hands out a hostname such as `abc123.bay.localhost`, and keeps that slug → buoy mapping in memory. This is the link you share with your testers or webhook providers.
+3. When an external client sends an HTTP request to that hostname, bay terminates the TCP/TLS connection, packages the request (method, headers, and body) as JSON, and streams it over the existing WebSocket to the buoy.
+4. The buoy replays the request against `http://127.0.0.1:<local_port>`, captures the response, and ferries it back over the WebSocket.
+5. Bay unwraps the response, writes it back to the original client, and logs timing information so you can observe tunnel health.
+
+### Sequence diagram
+
+```mermaid
+sequenceDiagram
+    participant Dev as developer
+    participant Bay as bay relay
+    participant Buoy as buoy client
+    participant App as local app (127.0.0.1:PORT)
+    participant Client as public client
+
+    Dev->>Bay: Launch cargo run -p bay
+    Dev->>Buoy: Start buoy with control URL + local port
+    Buoy->>Bay: register(local_port, requested slug)
+    Bay-->>Buoy: registered slug.bay.localhost
+    Client->>Bay: HTTPS Host: slug.bay.localhost
+    Bay->>Buoy: forward_request JSON
+    Buoy->>App: HTTP replay to localhost
+    App-->>Buoy: HTTP response
+    Buoy-->>Bay: forward_response JSON
+    Bay-->>Client: Public HTTP response
+```
+
+From the end-user’s perspective they just load the shared URL; behind the scenes TunnelBay is acting like a programmable reverse proxy that bridges public traffic to your private network without needing any inbound connectivity.
+
 ## Components at a glance
 
 - **Bay (relay)**  
@@ -57,38 +89,6 @@ Rust workspace with two binaries:
    curl -H "Host: abc123.bay.localhost" http://127.0.0.1:8080
    ```
    Replace `abc123` with the slug the buoy printed. You should see the content served by your local HTTP server.
-
-### What happens under the hood
-
-1. You start a buoy beside your local service. It stores the port it needs to hit (for example `3000`) and establishes a single outbound WebSocket to the bay’s `/control` endpoint.
-2. Bay acknowledges the connection, hands out a hostname such as `abc123.bay.localhost`, and keeps that slug → buoy mapping in memory. This is the link you share with your testers or webhook providers.
-3. When an external client sends an HTTP request to that hostname, bay terminates the TCP/TLS connection, packages the request (method, headers, and body) as JSON, and streams it over the existing WebSocket to the buoy.
-4. The buoy replays the request against `http://127.0.0.1:<local_port>`, captures the response, and ferries it back over the WebSocket.
-5. Bay unwraps the response, writes it back to the original client, and logs timing information so you can observe tunnel health.
-
-#### Request flow at a glance
-
-```mermaid
-sequenceDiagram
-    participant Dev as developer
-    participant Bay as bay relay
-    participant Buoy as buoy client
-    participant App as local app (127.0.0.1:PORT)
-    participant Client as public client
-
-    Dev->>Bay: Launch cargo run -p bay
-    Dev->>Buoy: Start buoy with control URL + local port
-    Buoy->>Bay: register(local_port, requested slug)
-    Bay-->>Buoy: registered slug.bay.localhost
-    Client->>Bay: HTTPS Host: slug.bay.localhost
-    Bay->>Buoy: forward_request JSON
-    Buoy->>App: HTTP replay to localhost
-    App-->>Buoy: HTTP response
-    Buoy-->>Bay: forward_response JSON
-    Bay-->>Client: Public HTTP response
-```
-
-From the end-user’s perspective they just load the shared URL; behind the scenes TunnelBay is acting like a programmable reverse proxy that bridges public traffic to your private network without needing any inbound connectivity.
 
 ### Building container images
 
