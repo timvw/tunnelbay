@@ -1,0 +1,20 @@
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: bay-wildcard
+  namespace: bay
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    - match: HostRegexp(`^[a-z0-9-]+\.bay\.apps\.timvw\.be$`)
+      kind: Rule
+      services:
+        - name: bay
+          port: 8080
+  tls:
+    certResolver: dnsresolver
+    domains:
+      - main: bay.apps.timvw.be
+        sans:
+          - "*.bay.apps.timvw.be"

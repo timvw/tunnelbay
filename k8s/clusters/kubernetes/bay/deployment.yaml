@@ -1,0 +1,38 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bay
+  namespace: bay
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: bay
+  template:
+    metadata:
+      labels:
+        app: bay
+    spec:
+      containers:
+        - name: bay
+          image: ghcr.io/timvw/tunnelbay-bay:v0.7
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: BAY_DOMAIN
+              value: bay.apps.timvw.be
+            - name: BAY_HTTP_ADDR
+              value: 0.0.0.0:8080
+            - name: BAY_CONTROL_ADDR
+              value: 0.0.0.0:7070
+          ports:
+            - name: http
+              containerPort: 8080
+            - name: control
+              containerPort: 7070
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi

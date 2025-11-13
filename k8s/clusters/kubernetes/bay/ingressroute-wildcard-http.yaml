@@ -1,0 +1,17 @@
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: bay-wildcard-http
+  namespace: bay
+spec:
+  entryPoints:
+    - web
+  routes:
+    - match: HostRegexp(`^[a-z0-9-]+\.bay\.apps\.timvw\.be$`)
+      kind: Rule
+      middlewares:
+        - name: redirect-to-https
+          namespace: traefik
+      services:
+        - name: bay
+          port: 8080

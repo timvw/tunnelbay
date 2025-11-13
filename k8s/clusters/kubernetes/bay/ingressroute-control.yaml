@@ -1,0 +1,18 @@
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: bay-control
+  namespace: bay
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    - match: Host(`bay.apps.timvw.be`) && PathPrefix(`/control`)
+      kind: Rule
+      services:
+        - name: bay
+          port: 7070
+  tls:
+    certResolver: leresolver
+    domains:
+      - main: bay.apps.timvw.be
