@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1.19
+# syntax=docker/dockerfile:1.20
 
 FROM rust:1.91 AS builder
 RUN rustup target add x86_64-unknown-linux-musl
