@@ -1,3 +1,9 @@
+use std::{
+    fs,
+    path::PathBuf,
+    time::{Duration, Instant},
+};
+
 use anyhow::{anyhow, Context, Result};
 use base64::{engine::general_purpose, Engine as _};
 use clap::Parser;
@@ -7,9 +13,18 @@ use reqwest::{
     header::{HeaderName, HeaderValue},
     Client as HttpClient, Method,
 };
-use tokio_tungstenite::{connect_async, tungstenite::protocol::Message as WsMessage};
+use serde::Deserialize;
+use tokio::time::sleep;
+use tokio_tungstenite::{
+    connect_async,
+    tungstenite::{
+        client::IntoClientRequest,
+        http::{header::AUTHORIZATION as WS_AUTHORIZATION, HeaderValue as WsHeaderValue},
+        protocol::Message as WsMessage,
+    },
+};
 
-#[derive(Parser, Debug)]
+#[derive(Parser)]
 struct Args {
     /// WebSocket URL for the bay control plane
     #[arg(
@@ -24,13 +39,55 @@ struct Args {
     /// Optional requested subdomain/slug
     #[arg(long, env = "TUNNELBAY_SUBDOMAIN")]
     subdomain: Option<String>,
+    /// Bearer token to send as Authorization header to bay
+    #[arg(long, env = "TUNNELBAY_AUTH_TOKEN", hide_env_values = true)]
+    auth_token: Option<String>,
+    /// Path to a file that contains the bearer token
+    #[arg(long, env = "TUNNELBAY_AUTH_TOKEN_FILE")]
+    auth_token_file: Option<PathBuf>,
+    /// OAuth 2.0 device authorization endpoint
+    #[arg(long, env = "TUNNELBAY_OAUTH_DEVICE_CODE_URL")]
+    oauth_device_code_url: Option<String>,
+    /// OAuth 2.0 token endpoint used to poll for device flow tokens
+    #[arg(long, env = "TUNNELBAY_OAUTH_TOKEN_URL")]
+    oauth_token_url: Option<String>,
+    /// OAuth 2.0 client ID registered with the identity provider
+    #[arg(long, env = "TUNNELBAY_OAUTH_CLIENT_ID")]
+    oauth_client_id: Option<String>,
+    /// Optional OAuth 2.0 client secret for confidential clients
+    #[arg(long, env = "TUNNELBAY_OAUTH_CLIENT_SECRET", hide_env_values = true)]
+    oauth_client_secret: Option<String>,
+    /// Space-separated scopes requested during OAuth authentication
+    #[arg(
+        long,
+        env = "TUNNELBAY_OAUTH_SCOPE",
+        default_value = "openid profile email offline_access"
+    )]
+    oauth_scope: String,
+    /// Optional audience parameter to include in the device authorization request
+    #[arg(long, env = "TUNNELBAY_OAUTH_AUDIENCE")]
+    oauth_audience: Option<String>,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
 
-    let (ws_stream, _) = connect_async(&args.control_url)
+    let auth_token = resolve_auth_token(&args).await?;
+    let mut request = args
+        .control_url
+        .clone()
+        .into_client_request()
+        .context("failed to prepare control-plane request")?;
+
+    if let Some(token) = auth_token.as_deref() {
+        let value = format!("Bearer {token}");
+        let header_value =
+            WsHeaderValue::from_str(&value).context("invalid characters in bearer token")?;
+        request.headers_mut().insert(WS_AUTHORIZATION, header_value);
+    }
+
+    let (ws_stream, _) = connect_async(request)
         .await
         .with_context(|| format!("failed to connect to bay at {}", args.control_url))?;
     let (mut ws_writer, mut ws_reader) = ws_stream.split();
@@ -202,5 +259,194 @@ fn build_error_response(request_id: String) -> ClientToServer {
             value: "text/plain".into(),
         }],
         body: general_purpose::STANDARD.encode(payload),
+    }
+}
+
+async fn resolve_auth_token(args: &Args) -> Result<Option<String>> {
+    if let Some(token) = args.auth_token.clone() {
+        return Ok(Some(token));
+    }
+
+    if let Some(path) = &args.auth_token_file {
+        return Ok(Some(load_token_from_file(path)?));
+    }
+
+    if let Some(config) = DeviceFlowConfig::from_args(args)? {
+        let token = run_device_flow(&config).await?;
+        return Ok(Some(token));
+    }
+
+    Ok(None)
+}
+
+fn load_token_from_file(path: &PathBuf) -> Result<String> {
+    let contents = fs::read_to_string(path)
+        .with_context(|| format!("failed to read auth token from {}", path.display()))?;
+    let token = contents.trim();
+    if token.is_empty() {
+        anyhow::bail!("auth token file {} is empty", path.display());
+    }
+    Ok(token.to_string())
+}
+
+#[derive(Clone, Debug)]
+struct DeviceFlowConfig {
+    device_code_url: String,
+    token_url: String,
+    client_id: String,
+    client_secret: Option<String>,
+    scope: String,
+    audience: Option<String>,
+}
+
+impl DeviceFlowConfig {
+    fn from_args(args: &Args) -> Result<Option<Self>> {
+        match (
+            args.oauth_device_code_url.as_ref(),
+            args.oauth_token_url.as_ref(),
+            args.oauth_client_id.as_ref(),
+        ) {
+            (Some(device_url), Some(token_url), Some(client_id)) => Ok(Some(Self {
+                device_code_url: device_url.clone(),
+                token_url: token_url.clone(),
+                client_id: client_id.clone(),
+                client_secret: args.oauth_client_secret.clone(),
+                scope: args.oauth_scope.clone(),
+                audience: args.oauth_audience.clone(),
+            })),
+            (None, None, None) => Ok(None),
+            _ => anyhow::bail!(
+                "device authorization requires --oauth-device-code-url, --oauth-token-url, and --oauth-client-id"
+            ),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct DeviceAuthorizationResponse {
+    device_code: String,
+    user_code: String,
+    verification_uri: String,
+    #[serde(default)]
+    verification_uri_complete: Option<String>,
+    expires_in: u64,
+    #[serde(default)]
+    interval: Option<u64>,
+    #[serde(default)]
+    message: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DeviceTokenResponse {
+    access_token: String,
+    token_type: String,
+    #[serde(default)]
+    _expires_in: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DeviceTokenError {
+    error: String,
+    #[serde(default)]
+    error_description: Option<String>,
+}
+
+async fn run_device_flow(config: &DeviceFlowConfig) -> Result<String> {
+    println!("Starting OAuth device flow – follow the prompts to authenticate...");
+    let client = HttpClient::new();
+
+    let mut device_request = vec![
+        ("client_id".to_string(), config.client_id.clone()),
+        ("scope".to_string(), config.scope.clone()),
+    ];
+    if let Some(audience) = &config.audience {
+        device_request.push(("audience".into(), audience.clone()));
+    }
+
+    let device_auth: DeviceAuthorizationResponse = client
+        .post(&config.device_code_url)
+        .form(&device_request)
+        .send()
+        .await
+        .context("failed to request OAuth device code")?
+        .error_for_status()
+        .context("device authorization endpoint returned an error")?
+        .json()
+        .await
+        .context("invalid response from device authorization endpoint")?;
+
+    if let Some(uri) = &device_auth.verification_uri_complete {
+        println!("Visit {uri} to approve access");
+    } else {
+        println!(
+            "Visit {} and enter the code {}",
+            device_auth.verification_uri, device_auth.user_code
+        );
+    }
+    if let Some(message) = &device_auth.message {
+        println!("{message}");
+    }
+
+    let expires_at = Instant::now() + Duration::from_secs(device_auth.expires_in);
+    let mut interval = device_auth.interval.unwrap_or(5).max(1);
+
+    loop {
+        if Instant::now() >= expires_at {
+            anyhow::bail!("device authorization expired before approval");
+        }
+
+        sleep(Duration::from_secs(interval)).await;
+
+        let mut token_request = vec![
+            (
+                "grant_type".to_string(),
+                "urn:ietf:params:oauth:grant-type:device_code".to_string(),
+            ),
+            ("device_code".to_string(), device_auth.device_code.clone()),
+            ("client_id".to_string(), config.client_id.clone()),
+        ];
+        if let Some(secret) = &config.client_secret {
+            token_request.push(("client_secret".into(), secret.clone()));
+        }
+
+        let response = client
+            .post(&config.token_url)
+            .form(&token_request)
+            .send()
+            .await
+            .context("failed to poll OAuth token endpoint")?;
+
+        if response.status().is_success() {
+            let token: DeviceTokenResponse = response
+                .json()
+                .await
+                .context("invalid OAuth token response")?;
+            if !token.token_type.eq_ignore_ascii_case("bearer") {
+                anyhow::bail!(
+                    "token endpoint returned unsupported type {}",
+                    token.token_type
+                );
+            }
+            println!("Authentication approved. Continuing with tunnel registration...");
+            return Ok(token.access_token);
+        }
+
+        let error: DeviceTokenError = response
+            .json()
+            .await
+            .context("invalid error payload from OAuth token endpoint")?;
+        match error.error.as_str() {
+            "authorization_pending" => continue,
+            "slow_down" => {
+                interval += 5;
+                continue;
+            }
+            "access_denied" => anyhow::bail!("the sign-in request was denied"),
+            "expired_token" => anyhow::bail!("device authorization code expired"),
+            other => anyhow::bail!(
+                "token endpoint returned {other}: {}",
+                error.error_description.unwrap_or_default()
+            ),
+        }
     }
 }

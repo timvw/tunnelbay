@@ -1,20 +1,20 @@
 # Kubernetes deployment guide
 
-This guide documents how we run the `bay` relay on a Kubernetes cluster that is managed by Flux CD. The repo keeps the manifests under `k8s/clusters/kubernetes/bay/`, Traefik terminates TLS (with Let’s Encrypt), and DNS is automated either through Flux-managed controllers (external-dns) or via Terraform-managed Route53 records.
+This guide documents how we run the `bay` relay on a Kubernetes cluster that is managed by Flux CD. The repo keeps the manifests under `docs/k8s/clusters/kubernetes/bay/`, Traefik terminates TLS (with Let’s Encrypt), and DNS is automated either through Flux-managed controllers (external-dns) or via Terraform-managed Route53 records.
 
 ## Prerequisites
 
 - Published container images for `bay`/`buoy` (e.g. `ghcr.io/timvw/tunnelbay-bay:v0.7`).
-- Optional but recommended: Flux CD (v2) so that Git changes are reconciled automatically. You can also apply the manifests manually with `kubectl apply -k k8s/clusters/kubernetes/bay`.
+- Optional but recommended: Flux CD (v2) so that Git changes are reconciled automatically. You can also apply the manifests manually with `kubectl apply -k docs/k8s/clusters/kubernetes/bay`.
 - Traefik installed in front of the cluster. external-dns is optional—use it only if you want DNS records managed automatically; otherwise keep using the Terraform flow described later.
 - Control over the DNS zone that backs `BAY_DOMAIN` (for example `bay.apps.timvw.be`).
 
 ## 1. GitOps layout (Flux-friendly)
 
-All manifests for the relay live in `k8s/clusters/kubernetes/bay/` and follow the same structure whether Flux applies them or you run `kubectl apply -k` manually:
+All manifests for the relay live in `docs/k8s/clusters/kubernetes/bay/` and follow the same structure whether Flux applies them or you run `kubectl apply -k` manually:
 
 ```
-k8s/clusters/kubernetes/bay/
+docs/k8s/clusters/kubernetes/bay/
 ├── deployment.yaml
 ├── ingressroute-control-http.yaml
 ├── ingressroute-control.yaml
@@ -31,7 +31,7 @@ Key files:
 - `deployment.yaml` – deploys the relay using the published GHCR image and sets `BAY_DOMAIN`, `BAY_HTTP_ADDR`, and `BAY_CONTROL_ADDR`.
 - `service.yaml` – exposes port `8080` for HTTP traffic and `7070` for WebSocket control.
 - `ingressroute-*.yaml` – Traefik IngressRoutes that forward wildcard traffic (`*.bay.apps.timvw.be`) and `/control` to the Service, complete with redirect-to-HTTPS middleware.
-- `kustomization.yaml` – the entry point that Flux watches. If you are not using Flux you can still apply everything with `kubectl apply -k k8s/clusters/kubernetes/bay`.
+- `kustomization.yaml` – the entry point that Flux watches. If you are not using Flux you can still apply everything with `kubectl apply -k docs/k8s/clusters/kubernetes/bay`.
 
 ## 2. Deploying (Flux or kubectl)
 
@@ -46,11 +46,11 @@ Key files:
    flux reconcile source git flux-system --with-source
    flux reconcile kustomization cluster --with-source
    ```
-   Replace `cluster` with the name of the Flux `Kustomization` that includes `k8s/clusters/kubernetes`. Flux will apply `k8s/clusters/kubernetes/bay/kustomization.yaml`, creating/updating every manifest inside.
+   Replace `cluster` with the name of the Flux `Kustomization` that includes `docs/k8s/clusters/kubernetes`. Flux will apply `docs/k8s/clusters/kubernetes/bay/kustomization.yaml`, creating/updating every manifest inside.
 
    **Not using Flux?** Run the same manifests manually:
    ```bash
-   kubectl apply -k k8s/clusters/kubernetes/bay
+   kubectl apply -k docs/k8s/clusters/kubernetes/bay
    ```
    This applies the namespace, Deployment, Service, and IngressRoutes directly without Flux in the loop.
 
@@ -139,7 +139,7 @@ You can also schedule buoys inside the cluster by deploying the `buoy` container
 
 ## 6. Final verification
 
-- Manifests under `k8s/clusters/kubernetes/bay/` reference the correct image and domain.
+- Manifests under `docs/k8s/clusters/kubernetes/bay/` reference the correct image and domain.
 - Flux successfully reconciles the `kustomization.yaml` in that directory.
 - Traefik reports healthy routes for wildcard and control traffic; certificates use the expected resolvers.
 - DNS contains both `bay.apps.timvw.be` and `*.bay.apps.timvw.be`, either via external-dns or Terraform.

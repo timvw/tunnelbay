@@ -136,6 +136,12 @@ TLS termination, auth, and multi-tenant policies are intentionally out of scope 
 | `BAY_DOMAIN` (`bay.localhost`) | Base domain used when advertising hostnames to buoys. For example, use `bay.apps.timvw.be` so public URLs look like `*.bay.apps.timvw.be`. |
 | `BAY_HTTP_ADDR` (`0.0.0.0:8080`) | Address the HTTP listener should bind to inside the container. |
 | `BAY_CONTROL_ADDR` (`0.0.0.0:7070`) | Address for buoy control connections (plain TCP / WebSocket `/control`). |
+| `BAY_AUTH_MODE` (`disabled`) | Set to `oidc` to require `Authorization: Bearer <token>` during buoy registration. |
+| `BAY_AUTH_JWKS_URL` (unset) | HTTPS URL to the JWKS document used to validate OAuth/OIDC tokens when auth mode is `oidc`. |
+| `BAY_AUTH_AUDIENCE` (unset) | Optional audience claim that tokens must contain. |
+| `BAY_AUTH_ISSUER` (unset) | Optional issuer claim that tokens must match. |
+| `BAY_AUTH_REQUIRED_SCOPES` (unset) | Comma-separated list of scopes that a token must include to register a buoy. |
+| `BAY_AUTH_JWKS_CACHE_SECS` (`300`) | How long (seconds) to cache the JWKS document before re-fetching it. |
 
 Example:
 
@@ -155,3 +161,65 @@ bay
 | `TUNNELBAY_CONTROL_URL` (`ws://127.0.0.1:7070/control`) | WebSocket URL for the bay control plane. |
 | `TUNNELBAY_LOCAL_PORT` (`3000`) | Local TCP port that the buoy forwards traffic to. |
 | `TUNNELBAY_SUBDOMAIN` (unset) | Optional requested slug/hostname. Bay falls back to a random slug if unavailable. |
+| `TUNNELBAY_AUTH_TOKEN` (unset) | Bearer token that `buoy` sends to bay (same as `--auth-token`). |
+| `TUNNELBAY_AUTH_TOKEN_FILE` (unset) | Path to a file that stores the bearer token (same as `--auth-token-file`). |
+| `TUNNELBAY_OAUTH_DEVICE_CODE_URL` (unset) | OAuth device authorization endpoint used to obtain a token interactively. |
+| `TUNNELBAY_OAUTH_TOKEN_URL` (unset) | OAuth token endpoint that the device flow polls. |
+| `TUNNELBAY_OAUTH_CLIENT_ID` (unset) | OAuth client ID used during the device flow. |
+| `TUNNELBAY_OAUTH_CLIENT_SECRET` (unset) | Optional OAuth client secret for confidential clients. |
+| `TUNNELBAY_OAUTH_SCOPE` (`openid profile email offline_access`) | Scopes requested when running the device flow. |
+| `TUNNELBAY_OAUTH_AUDIENCE` (unset) | Optional audience parameter included in device flow requests. |
+
+## Enforcing SSO/OAuth before buoy registration
+
+TunnelBay can ensure that every buoy is registered by an authenticated user. Enable the policy on bay by switching to the OIDC mode and providing the JWKS endpoint plus any required claim checks:
+
+```bash
+BAY_AUTH_MODE=oidc \
+BAY_AUTH_JWKS_URL=https://authentik.apps.timvw.be/application/o/tunnelbay/jwks/ \
+BAY_AUTH_ISSUER=https://authentik.apps.timvw.be/application/o/tunnelbay/ \
+BAY_AUTH_AUDIENCE=tunnelbay \
+BAY_AUTH_REQUIRED_SCOPES=register:buoy \
+bay
+```
+
+With `oidc` enabled, bay validates each `Authorization: Bearer <token>` header before allowing a WebSocket upgrade. Tokens must be signed by one of the keys in `BAY_AUTH_JWKS_URL`, and (optionally) match the configured issuer, audience, and scope requirements. Unauthorized requests receive `401/403` responses before the WebSocket is established.
+
+On the buoy side you can either:
+
+1. Supply an existing bearer token via `--auth-token`, `--auth-token-file`, or their corresponding environment variables.
+2. Provide `--oauth-device-code-url`, `--oauth-token-url`, and `--oauth-client-id` to let the CLI run the OAuth 2.0 device authorization flow. The CLI prints the verification URL and code, polls the token endpoint, and automatically injects the resulting access token into the WebSocket handshake.
+
+This keeps buoy registration behind your SSO provider while still allowing developers to authenticate quickly from the terminal.
+
+### How bay validates tokens
+
+Bay never acts as an OAuth client—it simply verifies the bearer token passed by buoy. The checks performed when `BAY_AUTH_MODE=oidc` are:
+
+1. **Signature validation** via `BAY_AUTH_JWKS_URL` using RS256.
+2. **Issuer match** (`BAY_AUTH_ISSUER`).
+3. **Audience match** (`BAY_AUTH_AUDIENCE`). Leave this unset if you don’t want to restrict audience.
+4. **Scope/claim enforcement** (`BAY_AUTH_REQUIRED_SCOPES`). For `register:buoy`, bay accepts either a literal scope entry or the boolean claim that Authentik emits for that scope.
+
+Because bay never requests tokens itself, no OAuth client secret is necessary for the server.
+
+### Running buoy with the OAuth device flow
+
+Developers authenticate interactively from the CLI. With Authentik the environment looks like:
+
+```bash
+export TUNNELBAY_CONTROL_URL=ws://127.0.0.1:7070/control
+export TUNNELBAY_LOCAL_PORT=3000
+export TUNNELBAY_OAUTH_DEVICE_CODE_URL=https://authentik.apps.timvw.be/application/o/device/
+export TUNNELBAY_OAUTH_TOKEN_URL=https://authentik.apps.timvw.be/application/o/token/
+export TUNNELBAY_OAUTH_CLIENT_ID=tunnelbay
+export TUNNELBAY_OAUTH_SCOPE="openid profile email offline_access register:buoy"
+export TUNNELBAY_OAUTH_AUDIENCE=tunnelbay
+cargo run -p buoy --release
+```
+
+Buoy prints the verification URL/code from Authentik; after the user approves the request, buoy automatically injects the resulting access token into the WebSocket handshake.
+
+### Sample Authentik IaC
+
+If you manage Authentik via Terraform, the `docs/infra/authentik/tunnelbay-demo.tf` file contains a drop-in configuration that creates the custom scope mapping, OAuth provider, application, and access group. Copy that directory, fill in your Authentik URL/token, and run `terraform init && terraform apply`. The outputs list the issuer/JWKS/device/token endpoints bay and buoy need.
