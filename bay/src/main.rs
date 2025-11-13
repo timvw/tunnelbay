@@ -4,16 +4,17 @@ use anyhow::Result;
 use axum::{
     body::{to_bytes, Body},
     extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade},
-    extract::{ConnectInfo, Host, State},
+    extract::{ConnectInfo, State},
     http::{header::HeaderName, header::HeaderValue, HeaderMap, Request, Response, StatusCode},
     response::IntoResponse,
     routing::{any, get},
     Router,
 };
+use axum_extra::extract::Host;
 use base64::{engine::general_purpose, Engine as _};
 use futures::{future, SinkExt, StreamExt};
 use proto::{ClientToServer, Header, ServerToClient};
-use rand::{distributions::Alphanumeric, Rng};
+use rand::distr::{Alphanumeric, SampleString};
 use tokio::{
     net::TcpListener,
     sync::{mpsc, oneshot, Mutex, RwLock},
@@ -272,7 +273,7 @@ async fn handle_buoy_ws(socket: WebSocket, state: Arc<AppState>, ip_address: Str
                     if writer_sender
                         .lock()
                         .await
-                        .send(WsMessage::Text(line))
+                        .send(WsMessage::Text(line.into()))
                         .await
                         .is_err()
                     {
@@ -378,12 +379,8 @@ fn extract_slug(host: &str) -> Option<&str> {
 }
 
 fn random_slug() -> String {
-    rand::thread_rng()
-        .sample_iter(&Alphanumeric)
-        .take(6)
-        .map(char::from)
-        .collect::<String>()
-        .to_lowercase()
+    let mut rng = rand::rng();
+    Alphanumeric.sample_string(&mut rng, 6).to_lowercase()
 }
 
 struct AppState {
