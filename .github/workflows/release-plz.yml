@@ -53,14 +53,33 @@ jobs:
           app-id: ${{ secrets.BOT_APP_ID }}
           private-key: ${{ secrets.BOT_PRIVATE_KEY }}
 
-      - name: Run release-plz
-        uses: MarcoIeni/release-plz-action@v0.5
+      - name: Install release-plz
+        uses: taiki-e/install-action@v2
         with:
-          command: release-pr # skip publishing while crates remain private
-          args: ${{ steps.registry-manifest.outputs.registry_manifest_path != '' && format('--registry-manifest-path {0}', steps.registry-manifest.outputs.registry_manifest_path) || '' }}
+          tool: release-plz@0.3.148
+
+      - name: Configure git for release-plz
+        uses: release-plz/git-config@59144859caf016f8b817a2ac9b051578729173c4
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+
+      - name: Run release-plz
         env:
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          REGISTRY_MANIFEST_PATH: ${{ steps.registry-manifest.outputs.registry_manifest_path }}
+        run: |
+          set -euo pipefail
+          args=()
+          if [ -n "${REGISTRY_MANIFEST_PATH}" ]; then
+            args+=(--registry-manifest-path "${REGISTRY_MANIFEST_PATH}")
+          fi
+
+          release-plz release-pr \
+            --git-token "${GITHUB_TOKEN}" \
+            --repo-url "https://github.com/${GITHUB_REPOSITORY}" \
+            -o json \
+            "${args[@]}"
 
       - name: Assert App token present
         run: |
