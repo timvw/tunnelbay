@@ -1,6 +1,6 @@
 [package]
 name = "buoy"
-version = "0.8.0"
+version = "0.9.0"
 edition = "2021"
 
 [dependencies]
@@ -18,4 +18,3 @@ tokio-tungstenite = { version = "0.28", default-features = false, features = ["r
 [dev-dependencies]
 hyper014 = { package = "hyper", version = "0.14", features = ["full"] }
 tempfile = "3"
-
