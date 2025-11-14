@@ -29,6 +29,12 @@ build-buoy-container:
 		-t tunnelbay-buoy:dev \
 		.
 
-
-
-
+buoy-timvw local_port='3000':
+	export TUNNELBAY_CONTROL_URL="wss://bay.apps.timvw.be/control"; \
+	export TUNNELBAY_LOCAL_PORT="{{local_port}}"; \
+	export TUNNELBAY_OAUTH_DEVICE_CODE_URL="https://authentik.apps.timvw.be/application/o/device/"; \
+	export TUNNELBAY_OAUTH_TOKEN_URL="https://authentik.apps.timvw.be/application/o/token/"; \
+	export TUNNELBAY_OAUTH_CLIENT_ID="tunnelbay"; \
+	export TUNNELBAY_OAUTH_SCOPE="openid profile email offline_access register:buoy"; \
+	export TUNNELBAY_OAUTH_AUDIENCE="tunnelbay"; \
+	cargo run -p buoy --release
