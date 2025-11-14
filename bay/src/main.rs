@@ -820,14 +820,14 @@ mod tests {
                         }
                         Ok(WsMessage::Ping(payload)) => {
                             let _ = writer.send(WsMessage::Pong(payload)).await;
-                        }
-                        Ok(WsMessage::Close(_)) => break;
-                        Ok(WsMessage::Pong(_)) => {}
-                        Ok(WsMessage::Binary(_)) => {}
-                        Ok(WsMessage::Frame(_)) => {}
+                        },
+                        Ok(WsMessage::Close(_)) => break,
+                        Ok(WsMessage::Pong(_)) => {},
+                        Ok(WsMessage::Binary(_)) => {},
+                        Ok(WsMessage::Frame(_)) => {},
                         Err(err) => {
                             panic!("websocket error: {err}");
-                        }
+                        },
                     }
                 }
             });
