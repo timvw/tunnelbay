@@ -27,6 +27,7 @@ pub enum ClientToServer {
 pub enum ServerToClient {
     Registered {
         hostname: String,
+        url: String,
     },
     ForwardRequest {
         request_id: String,

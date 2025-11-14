@@ -124,6 +124,7 @@ The workflow `.github/workflows/release-images.yaml` runs the same builds on tag
 - Each HTTP body is limited to 2 MiB by `MAX_REQUEST_BYTES`. Tune this constant if you need larger payloads.
 - X-Forwarded-For is added on the bay side, sourcing either the `x-forwarded-for` header from the control connection (when bay is behind an ingress) or the TCP peer IP.
 - If the WebSocket drops, bay removes the slug; starting the buoy again re-registers and yields a fresh mapping.
+- Bay reports the full public URL (scheme + port) to each buoy. Override it with `BAY_PUBLIC_SCHEME`/`BAY_PUBLIC_PORT` when running behind TLS or custom ingress ports.
 
 TLS termination, auth, and multi-tenant policies are intentionally out of scope for this first cut; you can place bay behind Traefik or another ingress to add HTTPS.
 
@@ -135,6 +136,8 @@ TLS termination, auth, and multi-tenant policies are intentionally out of scope 
 | --- | --- |
 | `BAY_DOMAIN` (`127.0.0.1.sslip.io`) | Base domain used when advertising hostnames to buoys. For example, use `bay.apps.timvw.be` so public URLs look like `*.bay.apps.timvw.be`. |
 | `BAY_HTTP_ADDR` (`0.0.0.0:8080`) | Address the HTTP listener should bind to inside the container. |
+| `BAY_PUBLIC_SCHEME` (`http`) | Scheme advertised to buoys. Switch to `https` when bay sits behind TLS. |
+| `BAY_PUBLIC_PORT` (derived from `BAY_HTTP_ADDR`, falling back to the scheme default) | External port included in advertised URLs unless it matches the scheme default. |
 | `BAY_CONTROL_ADDR` (`0.0.0.0:7070`) | Address for buoy control connections (plain TCP / WebSocket `/control`). |
 | `BAY_AUTH_MODE` (`disabled`) | Set to `oidc` to require `Authorization: Bearer <token>` during buoy registration. |
 | `BAY_AUTH_JWKS_URL` (unset) | HTTPS URL to the JWKS document used to validate OAuth/OIDC tokens when auth mode is `oidc`. |

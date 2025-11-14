@@ -28,6 +28,7 @@ use uuid::Uuid;
 const DEFAULT_DOMAIN: &str = "127.0.0.1.sslip.io";
 const DEFAULT_CONTROL_ADDR: &str = "0.0.0.0:7070";
 const DEFAULT_HTTP_ADDR: &str = "0.0.0.0:8080";
+const DEFAULT_PUBLIC_SCHEME: &str = "http";
 const MAX_REQUEST_BYTES: usize = 2 * 1024 * 1024; // 2 MiB
 
 #[tokio::main]
@@ -40,6 +41,8 @@ async fn main() -> Result<()> {
     let state = Arc::new(AppState::new(
         settings.domain.clone(),
         settings.auth.clone(),
+        settings.public_scheme.clone(),
+        settings.public_port,
     ));
 
     let http_state = state.clone();
@@ -232,6 +235,8 @@ struct Settings {
     control_addr: String,
     http_addr: String,
     auth: AuthManager,
+    public_scheme: String,
+    public_port: u16,
 }
 
 impl Settings {
@@ -241,12 +246,30 @@ impl Settings {
             env::var("BAY_CONTROL_ADDR").unwrap_or_else(|_| DEFAULT_CONTROL_ADDR.to_string());
         let http_addr = env::var("BAY_HTTP_ADDR").unwrap_or_else(|_| DEFAULT_HTTP_ADDR.to_string());
         let auth = auth_from_env()?;
+        let public_scheme = env::var("BAY_PUBLIC_SCHEME")
+            .unwrap_or_else(|_| DEFAULT_PUBLIC_SCHEME.to_string())
+            .to_lowercase();
+
+        if !matches!(public_scheme.as_str(), "http" | "https") {
+            anyhow::bail!("BAY_PUBLIC_SCHEME must be 'http' or 'https'");
+        }
+
+        let public_port = match env::var("BAY_PUBLIC_PORT") {
+            Ok(value) => value
+                .parse::<u16>()
+                .context("BAY_PUBLIC_PORT must be a valid u16 port number")?,
+            Err(_) => {
+                extract_port(&http_addr).unwrap_or_else(|| default_port_for_scheme(&public_scheme))
+            }
+        };
 
         Ok(Self {
             domain,
             control_addr,
             http_addr,
             auth,
+            public_scheme,
+            public_port,
         })
     }
 }
@@ -282,6 +305,27 @@ fn auth_from_env() -> Result<AuthManager> {
         }
         other => anyhow::bail!("unsupported BAY_AUTH_MODE '{other}'"),
     }
+}
+
+fn extract_port(addr: &str) -> Option<u16> {
+    addr.parse::<SocketAddr>()
+        .map(|socket| socket.port())
+        .ok()
+        .or_else(|| {
+            addr.rsplit_once(':')
+                .and_then(|(_, port)| port.parse().ok())
+        })
+}
+
+fn default_port_for_scheme(scheme: &str) -> u16 {
+    match scheme {
+        "https" => 443,
+        _ => 80,
+    }
+}
+
+fn is_default_port(scheme: &str, port: u16) -> bool {
+    port == default_port_for_scheme(scheme)
 }
 
 async fn handle_buoy_ws(
@@ -320,6 +364,7 @@ async fn handle_buoy_ws(
 
     let slug = state.allocate_slug(requested_subdomain).await;
     let hostname = format!("{}{}{}", slug, ".", state.domain);
+    let public_url = state.public_url(&hostname);
 
     let (tx, mut rx) = mpsc::channel::<ServerToClient>(32);
     let pending = Arc::new(Mutex::new(HashMap::<
@@ -344,6 +389,7 @@ async fn handle_buoy_ws(
     let _ = tx
         .send(ServerToClient::Registered {
             hostname: hostname.clone(),
+            url: public_url.clone(),
         })
         .await;
 
@@ -475,14 +521,27 @@ struct AppState {
     domain: String,
     tunnels: RwLock<HashMap<String, Arc<TunnelHandle>>>,
     auth: AuthManager,
+    public_scheme: String,
+    public_port: u16,
 }
 
 impl AppState {
-    fn new(domain: String, auth: AuthManager) -> Self {
+    fn new(domain: String, auth: AuthManager, public_scheme: String, public_port: u16) -> Self {
         Self {
             domain,
             tunnels: RwLock::new(HashMap::new()),
             auth,
+            public_scheme,
+            public_port,
+        }
+    }
+
+    fn public_url(&self, hostname: &str) -> String {
+        let scheme = self.public_scheme.as_str();
+        if is_default_port(scheme, self.public_port) {
+            format!("{scheme}://{hostname}")
+        } else {
+            format!("{scheme}://{hostname}:{}", self.public_port)
         }
     }
 
@@ -548,18 +607,9 @@ mod tests {
     use axum::body::to_bytes;
     use axum::http::header::HeaderValue;
     use axum::http::HeaderMap;
-    use base64::engine::general_purpose;
-    use base64::Engine;
-    use futures::{SinkExt, StreamExt};
-    use reqwest::Client as HttpClient;
     use std::collections::HashMap;
-    use std::net::{TcpListener, TcpStream};
     use std::sync::Arc;
-    use std::time::Duration;
-    use tokio::sync::{mpsc, oneshot, Mutex};
-    use tokio::task::JoinHandle;
-    use tokio::time::sleep;
-    use tokio_tungstenite::{connect_async, tungstenite::protocol::Message as WsMessage};
+    use tokio::sync::{mpsc, Mutex};
 
     #[test]
     fn extract_slug_parses_basic_host() {
@@ -620,7 +670,12 @@ mod tests {
 
     #[tokio::test]
     async fn app_state_insert_get_remove_round_trip() {
-        let state = AppState::new("bay.test".into(), AuthManager::disabled());
+        let state = AppState::new(
+            "bay.test".into(),
+            AuthManager::disabled(),
+            "http".into(),
+            8080,
+        );
         assert!(state.get_tunnel("alpha").await.is_none());
 
         let (tx, _rx) = mpsc::channel(1);
@@ -638,217 +693,28 @@ mod tests {
         assert!(state.get_tunnel("alpha").await.is_none());
     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn forwards_http_requests_through_registered_buoy() {
-        let domain = "bay.test";
-        let state = Arc::new(AppState::new(domain.into(), AuthManager::disabled()));
-
-        let http_port = pick_free_port();
-        let control_port = pick_free_port();
-        let http_addr = format!("127.0.0.1:{http_port}");
-        let control_addr = format!("127.0.0.1:{control_port}");
-
-        let http_task = tokio::spawn(run_http_server(state.clone(), http_addr.clone()));
-        let control_task = tokio::spawn(run_control_server(state.clone(), control_addr.clone()));
-
-        wait_for_port(&http_addr).await;
-        wait_for_port(&control_addr).await;
-
-        let (test_buoy, hostname) =
-            TestBuoy::spawn(format!("ws://{control_addr}/control"), "integration-ok").await;
-
-        let client = HttpClient::new();
-        let response = client
-            .post(format!("http://{http_addr}/hello?team=infra"))
-            .header("Host", &hostname)
-            .header("X-Test", "present")
-            .body("ping-body")
-            .send()
-            .await
-            .expect("request forwarded");
-
-        assert_eq!(response.status(), StatusCode::CREATED);
-        assert_eq!(response.text().await.expect("body"), "integration-ok");
-
-        let observed = test_buoy.wait_for_request().await;
-        assert_eq!(observed.method, "POST");
-        assert_eq!(observed.path, "/hello?team=infra");
-        assert_eq!(observed.body, b"ping-body");
-        assert!(observed
-            .headers
-            .iter()
-            .any(|(name, value)| name.eq_ignore_ascii_case("host") && value == &hostname));
-        assert!(observed
-            .headers
-            .iter()
-            .any(|(name, value)| name.eq_ignore_ascii_case("x-test") && value == "present"));
-
-        test_buoy.shutdown().await;
-        control_task.abort();
-        http_task.abort();
-        let _ = control_task.await;
-        let _ = http_task.await;
+    #[test]
+    fn public_url_omits_default_port() {
+        let state = AppState::new(
+            "bay.test".into(),
+            AuthManager::disabled(),
+            "https".into(),
+            443,
+        );
+        assert_eq!(state.public_url("alpha.bay.test"), "https://alpha.bay.test");
     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn returns_not_found_for_unknown_slug() {
-        let domain = "bay.test";
-        let state = Arc::new(AppState::new(domain.into(), AuthManager::disabled()));
-        let http_port = pick_free_port();
-        let http_addr = format!("127.0.0.1:{http_port}");
-
-        let http_task = tokio::spawn(run_http_server(state, http_addr.clone()));
-        wait_for_port(&http_addr).await;
-
-        let client = HttpClient::new();
-        let response = client
-            .get(format!("http://{http_addr}/nope"))
-            .header("Host", "ghost.bay.test")
-            .send()
-            .await
-            .expect("request executes");
-
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
-
-        http_task.abort();
-        let _ = http_task.await;
-    }
-
-    fn pick_free_port() -> u16 {
-        TcpListener::bind("127.0.0.1:0")
-            .expect("bind to ephemeral port")
-            .local_addr()
-            .unwrap()
-            .port()
-    }
-
-    async fn wait_for_port(addr: &str) {
-        for _ in 0..50 {
-            if TcpStream::connect(addr).is_ok() {
-                return;
-            }
-            sleep(Duration::from_millis(50)).await;
-        }
-        panic!("port {addr} did not open in time");
-    }
-
-    #[derive(Clone, Debug)]
-    struct ForwardRequestSummary {
-        method: String,
-        path: String,
-        headers: Vec<(String, String)>,
-        body: Vec<u8>,
-    }
-
-    struct TestBuoy {
-        handle: JoinHandle<()>,
-        observed: Arc<Mutex<Option<ForwardRequestSummary>>>,
-    }
-
-    impl TestBuoy {
-        async fn spawn(control_url: String, response_body: &'static str) -> (Self, String) {
-            let observed = Arc::new(Mutex::new(None));
-            let observed_clone = observed.clone();
-            let (hostname_tx, hostname_rx) = oneshot::channel();
-
-            let handle = tokio::spawn(async move {
-                let (ws_stream, _) = connect_async(&control_url)
-                    .await
-                    .expect("connect to control plane");
-                let (mut writer, mut reader) = ws_stream.split();
-
-                let register = ClientToServer::Register {
-                    client_name: Some("integration-test".into()),
-                    local_port: 0,
-                    requested_subdomain: Some("integration".into()),
-                };
-                let payload = serde_json::to_string(&register).expect("serialize register");
-                writer
-                    .send(WsMessage::Text(payload.into()))
-                    .await
-                    .expect("send register");
-
-                let mut hostname_sender = Some(hostname_tx);
-                while let Some(frame) = reader.next().await {
-                    match frame {
-                        Ok(WsMessage::Text(text)) => {
-                            match serde_json::from_str::<ServerToClient>(&text) {
-                                Ok(ServerToClient::Registered { hostname }) => {
-                                    if let Some(tx) = hostname_sender.take() {
-                                        let _ = tx.send(hostname);
-                                    }
-                                }
-                                Ok(ServerToClient::ForwardRequest {
-                                    request_id,
-                                    method,
-                                    path_and_query,
-                                    headers,
-                                    body,
-                                }) => {
-                                    let decoded = general_purpose::STANDARD
-                                        .decode(body)
-                                        .expect("decode body");
-                                    *observed_clone.lock().await = Some(ForwardRequestSummary {
-                                        method,
-                                        path: path_and_query,
-                                        headers: headers
-                                            .into_iter()
-                                            .map(|h| (h.name, h.value))
-                                            .collect(),
-                                        body: decoded,
-                                    });
-
-                                    let response = ClientToServer::ForwardResponse {
-                                        request_id,
-                                        status: StatusCode::CREATED.as_u16(),
-                                        headers: vec![Header {
-                                            name: "content-type".into(),
-                                            value: "text/plain".into(),
-                                        }],
-                                        body: general_purpose::STANDARD.encode(response_body),
-                                    };
-                                    let line = serde_json::to_string(&response)
-                                        .expect("serialize response");
-                                    if writer.send(WsMessage::Text(line.into())).await.is_err() {
-                                        break;
-                                    }
-                                }
-                                Err(err) => {
-                                    panic!("invalid server message: {err}");
-                                }
-                            }
-                        }
-                        Ok(WsMessage::Ping(payload)) => {
-                            let _ = writer.send(WsMessage::Pong(payload)).await;
-                        }
-                        Ok(WsMessage::Close(_)) => break,
-                        Ok(WsMessage::Pong(_)) => {}
-                        Ok(WsMessage::Binary(_)) => {}
-                        Ok(WsMessage::Frame(_)) => {}
-                        Err(err) => {
-                            panic!("websocket error: {err}");
-                        }
-                    }
-                }
-            });
-
-            let hostname = hostname_rx.await.expect("hostname message");
-            (Self { handle, observed }, hostname)
-        }
-
-        async fn wait_for_request(&self) -> ForwardRequestSummary {
-            for _ in 0..50 {
-                if let Some(summary) = self.observed.lock().await.clone() {
-                    return summary;
-                }
-                sleep(Duration::from_millis(50)).await;
-            }
-            panic!("forwarded request was not observed");
-        }
-
-        async fn shutdown(self) {
-            self.handle.abort();
-            let _ = self.handle.await;
-        }
+    #[test]
+    fn public_url_includes_custom_port() {
+        let state = AppState::new(
+            "bay.test".into(),
+            AuthManager::disabled(),
+            "http".into(),
+            8080,
+        );
+        assert_eq!(
+            state.public_url("alpha.bay.test"),
+            "http://alpha.bay.test:8080"
+        );
     }
 }

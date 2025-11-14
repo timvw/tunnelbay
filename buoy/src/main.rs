@@ -102,8 +102,8 @@ async fn main() -> Result<()> {
         .await
         .context("failed to send register message")?;
 
-    let hostname = wait_for_hostname(&mut ws_reader, &mut ws_writer).await?;
-    println!("Tunnel ready: https://{hostname}");
+    let (hostname, public_url) = wait_for_registration(&mut ws_reader, &mut ws_writer).await?;
+    println!("Tunnel ready: {public_url} (hostname {hostname})");
     println!("Forwarding requests to http://127.0.0.1:{}", args.port);
 
     let client = HttpClient::new();
@@ -125,8 +125,8 @@ async fn main() -> Result<()> {
         let message: ServerToClient = serde_json::from_str(&text)?;
 
         match message {
-            ServerToClient::Registered { hostname } => {
-                println!("Updated hostname: {hostname}");
+            ServerToClient::Registered { hostname, url } => {
+                println!("Updated tunnel: {url} (hostname {hostname})");
             }
             ServerToClient::ForwardRequest {
                 request_id,
@@ -165,15 +165,15 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn wait_for_hostname(
+async fn wait_for_registration(
     reader: &mut (impl futures::Stream<Item = Result<WsMessage, tokio_tungstenite::tungstenite::Error>>
               + Unpin),
     writer: &mut (impl futures::Sink<WsMessage, Error = tokio_tungstenite::tungstenite::Error> + Unpin),
-) -> Result<String> {
+) -> Result<(String, String)> {
     while let Some(frame) = reader.next().await {
         match frame {
             Ok(WsMessage::Text(text)) => match serde_json::from_str::<ServerToClient>(&text)? {
-                ServerToClient::Registered { hostname } => return Ok(hostname),
+                ServerToClient::Registered { hostname, url } => return Ok((hostname, url)),
                 other => {
                     eprintln!("Received {other:?} before hostname assignment");
                 }
