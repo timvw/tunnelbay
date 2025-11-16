@@ -57,6 +57,6 @@ bay-local-oidc http_port='8080' control_port='7070' domain='127.0.0.1.sslip.io':
 	cargo run -p bay --bin bay
 
 # Run buoy against the local bay, relying on bay-managed device login.
-# Only override the local port via env if needed.
-buoy-local:
-	TUNNELBAY_LOCAL_PORT=${TUNNELBAY_LOCAL_PORT:-3000} cargo run -p buoy --bin buoy
+# Optionally override the local port via parameter or env.
+buoy-local local_port='3000':
+	TUNNELBAY_LOCAL_PORT=${TUNNELBAY_LOCAL_PORT:-{{local_port}}} cargo run -p buoy --bin buoy
