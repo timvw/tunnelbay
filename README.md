@@ -141,10 +141,15 @@ TLS termination, auth, and multi-tenant policies are intentionally out of scope 
 | `BAY_CONTROL_ADDR` (`0.0.0.0:7070`) | Address for buoy control connections (plain TCP / WebSocket `/control`). |
 | `BAY_AUTH_MODE` (`disabled`) | Set to `oidc` to require `Authorization: Bearer <token>` during buoy registration. |
 | `BAY_AUTH_JWKS_URL` (unset) | HTTPS URL to the JWKS document used to validate OAuth/OIDC tokens when auth mode is `oidc`. |
-| `BAY_AUTH_AUDIENCE` (unset) | Optional audience claim that tokens must contain. |
+| `BAY_AUTH_AUDIENCE` (unset) | Optional audience claim that tokens must contain (also sent when bay requests device tokens). |
 | `BAY_AUTH_ISSUER` (unset) | Optional issuer claim that tokens must match. |
 | `BAY_AUTH_REQUIRED_SCOPES` (unset) | Comma-separated list of scopes that a token must include to register a buoy. |
 | `BAY_AUTH_JWKS_CACHE_SECS` (`300`) | How long (seconds) to cache the JWKS document before re-fetching it. |
+| `BAY_AUTH_DEVICE_CODE_URL` (unset) | OAuth device authorization endpoint used to start login prompts for buoy users. |
+| `BAY_AUTH_TOKEN_URL` (unset) | OAuth token endpoint polled by bay during the device flow. |
+| `BAY_AUTH_CLIENT_ID` (unset) | OAuth client ID bay uses when requesting device codes/tokens. |
+| `BAY_AUTH_CLIENT_SECRET` (unset) | Optional OAuth client secret (kept on the server). |
+| `BAY_AUTH_SCOPE` (`openid profile email`) | Space-separated scopes bay requests during the device flow. |
 
 Example:
 
@@ -166,12 +171,6 @@ bay
 | `TUNNELBAY_SUBDOMAIN` (unset) | Optional requested slug/hostname. Bay falls back to a random slug if unavailable. |
 | `TUNNELBAY_AUTH_TOKEN` (unset) | Bearer token that `buoy` sends to bay (same as `--auth-token`). |
 | `TUNNELBAY_AUTH_TOKEN_FILE` (unset) | Path to a file that stores the bearer token (same as `--auth-token-file`). |
-| `TUNNELBAY_OAUTH_DEVICE_CODE_URL` (unset) | OAuth device authorization endpoint used to obtain a token interactively. |
-| `TUNNELBAY_OAUTH_TOKEN_URL` (unset) | OAuth token endpoint that the device flow polls. |
-| `TUNNELBAY_OAUTH_CLIENT_ID` (unset) | OAuth client ID used during the device flow. |
-| `TUNNELBAY_OAUTH_CLIENT_SECRET` (unset) | Optional OAuth client secret for confidential clients. |
-| `TUNNELBAY_OAUTH_SCOPE` (`openid profile email offline_access`) | Scopes requested when running the device flow. |
-| `TUNNELBAY_OAUTH_AUDIENCE` (unset) | Optional audience parameter included in device flow requests. |
 
 ## Enforcing SSO/OAuth before buoy registration
 
@@ -183,6 +182,11 @@ BAY_AUTH_JWKS_URL=https://authentik.apps.timvw.be/application/o/tunnelbay/jwks/ 
 BAY_AUTH_ISSUER=https://authentik.apps.timvw.be/application/o/tunnelbay/ \
 BAY_AUTH_AUDIENCE=tunnelbay \
 BAY_AUTH_REQUIRED_SCOPES=register:buoy \
+BAY_AUTH_DEVICE_CODE_URL=https://authentik.apps.timvw.be/application/o/device/ \
+BAY_AUTH_TOKEN_URL=https://authentik.apps.timvw.be/application/o/token/ \
+BAY_AUTH_CLIENT_ID=tunnelbay \
+BAY_AUTH_CLIENT_SECRET=... \
+BAY_AUTH_SCOPE="openid profile email register:buoy" \
 bay
 ```
 
@@ -191,37 +195,32 @@ With `oidc` enabled, bay validates each `Authorization: Bearer <token>` header b
 On the buoy side you can either:
 
 1. Supply an existing bearer token via `--auth-token`, `--auth-token-file`, or their corresponding environment variables.
-2. Provide `--oauth-device-code-url`, `--oauth-token-url`, and `--oauth-client-id` to let the CLI run the OAuth 2.0 device authorization flow. The CLI prints the verification URL and code, polls the token endpoint, and automatically injects the resulting access token into the WebSocket handshake.
+2. Let bay drive the OAuth 2.0 device authorization flow. When `BAY_AUTH_DEVICE_CODE_URL`/`BAY_AUTH_TOKEN_URL`/`BAY_AUTH_CLIENT_ID` are configured, buoy calls bay’s `/auth/device` endpoints, shows the verification URL/code, and keeps the resulting access token in memory for the WebSocket handshake.
 
 This keeps buoy registration behind your SSO provider while still allowing developers to authenticate quickly from the terminal.
 
 ### How bay validates tokens
 
-Bay never acts as an OAuth client—it simply verifies the bearer token passed by buoy. The checks performed when `BAY_AUTH_MODE=oidc` are:
+Bay runs the device flow as a confidential OAuth client and validates every bearer token before allowing registration. The checks performed when `BAY_AUTH_MODE=oidc` are:
 
 1. **Signature validation** via `BAY_AUTH_JWKS_URL` using RS256.
 2. **Issuer match** (`BAY_AUTH_ISSUER`).
 3. **Audience match** (`BAY_AUTH_AUDIENCE`). Leave this unset if you don’t want to restrict audience.
 4. **Scope/claim enforcement** (`BAY_AUTH_REQUIRED_SCOPES`). For `register:buoy`, bay accepts either a literal scope entry or the boolean claim that Authentik emits for that scope.
 
-Because bay never requests tokens itself, no OAuth client secret is necessary for the server.
+Bay performs these checks against tokens it obtained via the device flow or tokens you provided, keeping the OAuth client secret on the server.
 
-### Running buoy with the OAuth device flow
+### Authenticating from buoy
 
-Developers authenticate interactively from the CLI. With Authentik the environment looks like:
+When bay is configured for OIDC (including the device/token endpoints and client ID), buoy automatically prompts you to complete the device flow—no identity-provider flags are required on the CLI. A typical local setup looks like:
 
 ```bash
 export TUNNELBAY_CONTROL_URL=ws://127.0.0.1:7070/control
 export TUNNELBAY_LOCAL_PORT=3000
-export TUNNELBAY_OAUTH_DEVICE_CODE_URL=https://authentik.apps.timvw.be/application/o/device/
-export TUNNELBAY_OAUTH_TOKEN_URL=https://authentik.apps.timvw.be/application/o/token/
-export TUNNELBAY_OAUTH_CLIENT_ID=tunnelbay
-export TUNNELBAY_OAUTH_SCOPE="openid profile email offline_access register:buoy"
-export TUNNELBAY_OAUTH_AUDIENCE=tunnelbay
 cargo run -p buoy --release
 ```
 
-Buoy prints the verification URL/code from Authentik; after the user approves the request, buoy automatically injects the resulting access token into the WebSocket handshake.
+Buoy prints the verification URL/code supplied by bay; after you approve the request, it injects the resulting access token into the WebSocket handshake and keeps it in memory only.
 
 ### Sample Authentik IaC
 

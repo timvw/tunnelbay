@@ -98,16 +98,10 @@ export BAY_AUTH_JWKS_URL=.../jwks/
 export BAY_AUTH_ISSUER=.../tunnelbay/
 export BAY_AUTH_AUDIENCE=tunnelbay
 export BAY_AUTH_REQUIRED_SCOPES=register:buoy
+export BAY_AUTH_DEVICE_CODE_URL=.../device/
+export BAY_AUTH_TOKEN_URL=.../token/
+export BAY_AUTH_CLIENT_ID=tunnelbay
+export BAY_AUTH_SCOPE="openid profile email register:buoy"
 ```
 
-Configure buoy with:
-
-```bash
-export TUNNELBAY_OAUTH_DEVICE_CODE_URL=.../device/
-export TUNNELBAY_OAUTH_TOKEN_URL=.../token/
-export TUNNELBAY_OAUTH_CLIENT_ID=tunnelbay
-export TUNNELBAY_OAUTH_SCOPE="openid profile email offline_access register:buoy"
-export TUNNELBAY_OAUTH_AUDIENCE=tunnelbay
-```
-
-With these pieces in place, every buoy registration requires an authenticated user who belongs to `TunnelBay Publishers`.
+With these pieces in place, every buoy registration requires an authenticated user who belongs to `TunnelBay Publishers`. Buoys no longer need OIDC configuration—they’ll call bay’s `/auth/device` endpoint, display the verification code, and keep the resulting token in memory for the WebSocket handshake.

@@ -1,23 +1,30 @@
 use std::{collections::HashMap, env, net::SocketAddr, sync::Arc, time::Duration};
 
 mod auth;
+mod device_flow;
 
 use auth::{AuthContext, AuthError, AuthManager, OidcConfig};
+use device_flow::{
+    DeviceFlowConfig, DeviceFlowError, DeviceFlowManager, DeviceFlowOutcome,
+};
 
 use anyhow::{Context, Result};
 use axum::{
     body::{to_bytes, Body},
     extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade},
-    extract::{ConnectInfo, State},
+    extract::{ConnectInfo, Path, State},
     http::{header::HeaderName, header::HeaderValue, HeaderMap, Request, Response, StatusCode},
     response::IntoResponse,
-    routing::{any, get},
+    routing::{any, get, post},
     Router,
+    Json,
 };
 use axum_extra::extract::Host;
 use base64::{engine::general_purpose, Engine as _};
 use futures::{future, SinkExt, StreamExt};
-use proto::{ClientToServer, Header, ServerToClient};
+use proto::{
+    ClientToServer, DeviceFlowPollResponse, Header, ServerToClient,
+};
 use rand::distr::{Alphanumeric, SampleString};
 use tokio::{
     net::TcpListener,
@@ -41,6 +48,7 @@ async fn main() -> Result<()> {
     let state = Arc::new(AppState::new(
         settings.domain.clone(),
         settings.auth.clone(),
+        settings.device_flow.clone(),
         settings.public_scheme.clone(),
         settings.public_port,
     ));
@@ -94,6 +102,8 @@ async fn run_http_server(state: Arc<AppState>, addr: String) -> Result<()> {
 async fn run_control_server(state: Arc<AppState>, addr: String) -> Result<()> {
     let app = Router::new()
         .route("/control", get(control_ws_handler))
+        .route("/auth/device", post(start_device_flow))
+        .route("/auth/device/{flow_id}/poll", post(poll_device_flow))
         .with_state(state);
     let listener = TcpListener::bind(&addr).await?;
     println!("Control endpoint listening on ws://{addr}/control");
@@ -230,11 +240,94 @@ async fn control_ws_handler(
     }
 }
 
+async fn start_device_flow(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let Some(manager) = state.device_flow() else {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            "OIDC device flow is not configured on bay",
+        )
+            .into_response();
+    };
+
+    match manager.start_flow().await {
+        Ok(flow) => Json(flow).into_response(),
+        Err(err) => {
+            eprintln!("Failed to initiate device flow: {err}");
+            (
+                StatusCode::BAD_GATEWAY,
+                "Authentication service is currently unavailable",
+            )
+                .into_response()
+        }
+    }
+}
+
+async fn poll_device_flow(
+    Path(flow_id): Path<String>,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let Some(manager) = state.device_flow() else {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            "OIDC device flow is not configured on bay",
+        )
+            .into_response();
+    };
+
+    match manager.poll_flow(&flow_id).await {
+        Ok(DeviceFlowOutcome::Authorized { access_token }) => {
+            let header_value = format!("Bearer {access_token}");
+            match state.authenticate(Some(&header_value)).await {
+                Ok(auth_ctx) => Json(DeviceFlowPollResponse::Approved {
+                    access_token,
+                    subject: auth_ctx.subject,
+                    email: auth_ctx.email,
+                })
+                .into_response(),
+                Err(err) => {
+                    eprintln!("Token from provider failed validation: {err}");
+                    (
+                        StatusCode::BAD_GATEWAY,
+                        "Authentication service returned an invalid token",
+                    )
+                        .into_response()
+                }
+            }
+        }
+        Ok(DeviceFlowOutcome::Pending { interval }) => {
+            Json(DeviceFlowPollResponse::Pending { interval }).into_response()
+        }
+        Ok(DeviceFlowOutcome::Denied {
+            error,
+            description,
+        }) => Json(DeviceFlowPollResponse::Denied {
+            error,
+            error_description: description,
+        })
+        .into_response(),
+        Ok(DeviceFlowOutcome::Expired) => Json(DeviceFlowPollResponse::Expired).into_response(),
+        Err(DeviceFlowError::NotFound) => (
+            StatusCode::NOT_FOUND,
+            "Unknown or expired device flow",
+        )
+            .into_response(),
+        Err(err) => {
+            eprintln!("Failed to poll device flow: {err}");
+            (
+                StatusCode::BAD_GATEWAY,
+                "Authentication service is currently unavailable",
+            )
+                .into_response()
+        }
+    }
+}
+
 struct Settings {
     domain: String,
     control_addr: String,
     http_addr: String,
     auth: AuthManager,
+    device_flow: Option<DeviceFlowManager>,
     public_scheme: String,
     public_port: u16,
 }
@@ -245,7 +338,9 @@ impl Settings {
         let control_addr =
             env::var("BAY_CONTROL_ADDR").unwrap_or_else(|_| DEFAULT_CONTROL_ADDR.to_string());
         let http_addr = env::var("BAY_HTTP_ADDR").unwrap_or_else(|_| DEFAULT_HTTP_ADDR.to_string());
-        let auth = auth_from_env()?;
+        let mode = env::var("BAY_AUTH_MODE").unwrap_or_else(|_| "disabled".into());
+        let auth = auth_from_env(&mode)?;
+        let device_flow = device_flow_from_env(&mode)?;
         let public_scheme = env::var("BAY_PUBLIC_SCHEME")
             .unwrap_or_else(|_| DEFAULT_PUBLIC_SCHEME.to_string())
             .to_lowercase();
@@ -268,14 +363,14 @@ impl Settings {
             control_addr,
             http_addr,
             auth,
+            device_flow,
             public_scheme,
             public_port,
         })
     }
 }
 
-fn auth_from_env() -> Result<AuthManager> {
-    let mode = env::var("BAY_AUTH_MODE").unwrap_or_else(|_| "disabled".into());
+fn auth_from_env(mode: &str) -> Result<AuthManager> {
     match mode.to_lowercase().as_str() {
         "disabled" => Ok(AuthManager::disabled()),
         "oidc" => {
@@ -305,6 +400,41 @@ fn auth_from_env() -> Result<AuthManager> {
         }
         other => anyhow::bail!("unsupported BAY_AUTH_MODE '{other}'"),
     }
+}
+
+fn device_flow_from_env(mode: &str) -> Result<Option<DeviceFlowManager>> {
+    if !mode.eq_ignore_ascii_case("oidc") {
+        return Ok(None);
+    }
+
+    let device_code_url = match env::var("BAY_AUTH_DEVICE_CODE_URL") {
+        Ok(value) => value,
+        Err(_) => return Ok(None),
+    };
+
+    let token_url = env::var("BAY_AUTH_TOKEN_URL").context(
+        "BAY_AUTH_TOKEN_URL must be set when BAY_AUTH_DEVICE_CODE_URL is configured",
+    )?;
+    let client_id = env::var("BAY_AUTH_CLIENT_ID").context(
+        "BAY_AUTH_CLIENT_ID must be set when BAY_AUTH_DEVICE_CODE_URL is configured",
+    )?;
+    let client_secret = env::var("BAY_AUTH_CLIENT_SECRET").ok();
+    let scope =
+        env::var("BAY_AUTH_SCOPE").unwrap_or_else(|_| "openid profile email".to_string());
+    let audience = env::var("BAY_AUTH_AUDIENCE").ok();
+
+    let config = DeviceFlowConfig {
+        device_code_url,
+        token_url,
+        client_id,
+        client_secret,
+        scope,
+        audience,
+    };
+
+    DeviceFlowManager::new(config)
+        .map(Some)
+        .map_err(|err| anyhow::anyhow!(err.to_string()))
 }
 
 fn extract_port(addr: &str) -> Option<u16> {
@@ -521,16 +651,24 @@ struct AppState {
     domain: String,
     tunnels: RwLock<HashMap<String, Arc<TunnelHandle>>>,
     auth: AuthManager,
+    device_flow: Option<DeviceFlowManager>,
     public_scheme: String,
     public_port: u16,
 }
 
 impl AppState {
-    fn new(domain: String, auth: AuthManager, public_scheme: String, public_port: u16) -> Self {
+    fn new(
+        domain: String,
+        auth: AuthManager,
+        device_flow: Option<DeviceFlowManager>,
+        public_scheme: String,
+        public_port: u16,
+    ) -> Self {
         Self {
             domain,
             tunnels: RwLock::new(HashMap::new()),
             auth,
+            device_flow,
             public_scheme,
             public_port,
         }
@@ -582,6 +720,10 @@ impl AppState {
 
     async fn authenticate(&self, header: Option<&str>) -> Result<AuthContext, AuthError> {
         self.auth.authenticate(header).await
+    }
+
+    fn device_flow(&self) -> Option<&DeviceFlowManager> {
+        self.device_flow.as_ref()
     }
 }
 
@@ -673,6 +815,7 @@ mod tests {
         let state = AppState::new(
             "bay.test".into(),
             AuthManager::disabled(),
+            None,
             "http".into(),
             8080,
         );
@@ -698,6 +841,7 @@ mod tests {
         let state = AppState::new(
             "bay.test".into(),
             AuthManager::disabled(),
+            None,
             "https".into(),
             443,
         );
@@ -709,6 +853,7 @@ mod tests {
         let state = AppState::new(
             "bay.test".into(),
             AuthManager::disabled(),
+            None,
             "http".into(),
             8080,
         );
