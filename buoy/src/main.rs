@@ -280,8 +280,8 @@ fn load_token_from_file(path: &PathBuf) -> Result<String> {
 }
 
 fn control_to_http_base(control_url: &str) -> Result<Url> {
-    let mut url = Url::parse(control_url)
-        .with_context(|| format!("invalid control URL {control_url}"))?;
+    let mut url =
+        Url::parse(control_url).with_context(|| format!("invalid control URL {control_url}"))?;
     let scheme = match url.scheme() {
         "ws" => "http",
         "wss" => "https",
@@ -375,9 +375,7 @@ async fn authenticate_via_bay(control_url: &str) -> Result<Option<String>> {
                 email,
             } => {
                 let display_name = email.as_deref().unwrap_or(&subject);
-                println!(
-                    "Authenticated as {display_name}. Continuing with tunnel registration..."
-                );
+                println!("Authenticated as {display_name}. Continuing with tunnel registration...");
                 return Ok(Some(access_token));
             }
             DeviceFlowPollResponse::Denied {

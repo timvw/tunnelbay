@@ -4,9 +4,7 @@ mod auth;
 mod device_flow;
 
 use auth::{AuthContext, AuthError, AuthManager, OidcConfig};
-use device_flow::{
-    DeviceFlowConfig, DeviceFlowError, DeviceFlowManager, DeviceFlowOutcome,
-};
+use device_flow::{DeviceFlowConfig, DeviceFlowError, DeviceFlowManager, DeviceFlowOutcome};
 
 use anyhow::{Context, Result};
 use axum::{
@@ -16,16 +14,13 @@ use axum::{
     http::{header::HeaderName, header::HeaderValue, HeaderMap, Request, Response, StatusCode},
     response::IntoResponse,
     routing::{any, get, post},
-    Router,
-    Json,
+    Json, Router,
 };
 use axum_extra::extract::Host;
 use base64::{engine::general_purpose, Engine as _};
 use clap::Parser;
 use futures::{future, SinkExt, StreamExt};
-use proto::{
-    ClientToServer, DeviceFlowPollResponse, Header, ServerToClient,
-};
+use proto::{ClientToServer, DeviceFlowPollResponse, Header, ServerToClient};
 use rand::distr::{Alphanumeric, SampleString};
 use tokio::{
     net::TcpListener,
@@ -69,7 +64,12 @@ struct Args {
     #[arg(long, env = "BAY_AUTH_ISSUER")]
     auth_issuer: Option<String>,
     /// Required scopes (comma-delimited)
-    #[arg(long, env = "BAY_AUTH_REQUIRED_SCOPES", value_delimiter = ',', default_value = "")]
+    #[arg(
+        long,
+        env = "BAY_AUTH_REQUIRED_SCOPES",
+        value_delimiter = ',',
+        default_value = ""
+    )]
     auth_required_scopes: Vec<String>,
     /// JWKS cache TTL in seconds
     #[arg(long, env = "BAY_AUTH_JWKS_CACHE_SECS", default_value_t = 300)]
@@ -351,20 +351,17 @@ async fn poll_device_flow(
         Ok(DeviceFlowOutcome::Pending { interval }) => {
             Json(DeviceFlowPollResponse::Pending { interval }).into_response()
         }
-        Ok(DeviceFlowOutcome::Denied {
-            error,
-            description,
-        }) => Json(DeviceFlowPollResponse::Denied {
-            error,
-            error_description: description,
-        })
-        .into_response(),
+        Ok(DeviceFlowOutcome::Denied { error, description }) => {
+            Json(DeviceFlowPollResponse::Denied {
+                error,
+                error_description: description,
+            })
+            .into_response()
+        }
         Ok(DeviceFlowOutcome::Expired) => Json(DeviceFlowPollResponse::Expired).into_response(),
-        Err(DeviceFlowError::NotFound) => (
-            StatusCode::NOT_FOUND,
-            "Unknown or expired device flow",
-        )
-            .into_response(),
+        Err(DeviceFlowError::NotFound) => {
+            (StatusCode::NOT_FOUND, "Unknown or expired device flow").into_response()
+        }
         Err(err) => {
             eprintln!("Failed to poll device flow: {err}");
             (

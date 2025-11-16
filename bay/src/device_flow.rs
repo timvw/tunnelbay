@@ -38,8 +38,12 @@ pub enum DeviceFlowError {
 
 #[derive(Debug)]
 pub enum DeviceFlowOutcome {
-    Pending { interval: u64 },
-    Authorized { access_token: String },
+    Pending {
+        interval: u64,
+    },
+    Authorized {
+        access_token: String,
+    },
     Denied {
         error: String,
         description: Option<String>,
@@ -122,9 +126,7 @@ impl DeviceFlowManager {
             .json()
             .await
             .map_err(|err| {
-                DeviceFlowError::Provider(format!(
-                    "invalid device authorization response: {err}"
-                ))
+                DeviceFlowError::Provider(format!("invalid device authorization response: {err}"))
             })?;
 
         let flow_id = Uuid::new_v4().to_string();
@@ -151,9 +153,7 @@ impl DeviceFlowManager {
     pub async fn poll_flow(&self, flow_id: &str) -> Result<DeviceFlowOutcome, DeviceFlowError> {
         let (device_code, interval) = {
             let sessions = self.sessions.lock().await;
-            let state = sessions
-                .get(flow_id)
-                .ok_or(DeviceFlowError::NotFound)?;
+            let state = sessions.get(flow_id).ok_or(DeviceFlowError::NotFound)?;
 
             if Instant::now() >= state.expires_at {
                 drop(sessions);
@@ -187,10 +187,9 @@ impl DeviceFlowManager {
             })?;
 
         if response.status().is_success() {
-            let token: ProviderTokenResponse = response
-                .json()
-                .await
-                .map_err(|err| DeviceFlowError::Provider(format!("invalid token response: {err}")))?;
+            let token: ProviderTokenResponse = response.json().await.map_err(|err| {
+                DeviceFlowError::Provider(format!("invalid token response: {err}"))
+            })?;
 
             if !token.token_type.eq_ignore_ascii_case("bearer") {
                 return Err(DeviceFlowError::Provider(format!(

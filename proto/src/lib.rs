@@ -54,7 +54,9 @@ pub enum ServerToClient {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum DeviceFlowPollResponse {
-    Pending { interval: u64 },
+    Pending {
+        interval: u64,
+    },
     Approved {
         access_token: String,
         subject: String,
