@@ -22,8 +22,8 @@ build-buoy-container:
 		-t tunnelbay-buoy:dev \
 		.
 
-bay-local http_port='8080' control_port='7070' domain='127.0.0.1.sslip.io':
-	cargo run -p bay --release -- 
+bay-local http-addr='0.0.0.0:8080' control-addr='127.0.0.1:7070' domain='127.0.0.1.sslip.io' *params='':
+	cargo run -p bay --release -- --http-addr {{http-addr}} --control-addr {{control-addr}} --domain {{domain}} {{params}}
 
 # Run bay locally with OIDC + device flow (defaults to authentik.apps.timvw.be endpoints).
 bay-local-oidc http_port='8080' control_port='7070' domain='127.0.0.1.sslip.io':
