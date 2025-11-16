@@ -1,4 +1,4 @@
-use std::{collections::HashMap, env, net::SocketAddr, sync::Arc, time::Duration};
+use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
 
 mod auth;
 mod device_flow;
@@ -21,6 +21,7 @@ use axum::{
 };
 use axum_extra::extract::Host;
 use base64::{engine::general_purpose, Engine as _};
+use clap::Parser;
 use futures::{future, SinkExt, StreamExt};
 use proto::{
     ClientToServer, DeviceFlowPollResponse, Header, ServerToClient,
@@ -38,9 +39,62 @@ const DEFAULT_HTTP_ADDR: &str = "0.0.0.0:8080";
 const DEFAULT_PUBLIC_SCHEME: &str = "http";
 const MAX_REQUEST_BYTES: usize = 2 * 1024 * 1024; // 2 MiB
 
+#[derive(Parser)]
+struct Args {
+    /// Base domain used when advertising hostnames to buoys
+    #[arg(long, env = "BAY_DOMAIN", default_value = DEFAULT_DOMAIN)]
+    domain: String,
+    /// Control-plane listen address (WebSocket /control)
+    #[arg(long, env = "BAY_CONTROL_ADDR", default_value = DEFAULT_CONTROL_ADDR)]
+    control_addr: String,
+    /// HTTP listen address for public traffic
+    #[arg(long, env = "BAY_HTTP_ADDR", default_value = DEFAULT_HTTP_ADDR)]
+    http_addr: String,
+    /// Public scheme advertised to buoys (http or https)
+    #[arg(long, env = "BAY_PUBLIC_SCHEME", default_value = DEFAULT_PUBLIC_SCHEME)]
+    public_scheme: String,
+    /// Public port advertised to buoys
+    #[arg(long, env = "BAY_PUBLIC_PORT")]
+    public_port: Option<u16>,
+    /// Authentication mode (disabled or oidc)
+    #[arg(long, env = "BAY_AUTH_MODE", default_value = "disabled")]
+    auth_mode: String,
+    /// JWKS URL for token validation (required when auth_mode=oidc)
+    #[arg(long, env = "BAY_AUTH_JWKS_URL")]
+    auth_jwks_url: Option<String>,
+    /// Expected token audience
+    #[arg(long, env = "BAY_AUTH_AUDIENCE")]
+    auth_audience: Option<String>,
+    /// Expected token issuer
+    #[arg(long, env = "BAY_AUTH_ISSUER")]
+    auth_issuer: Option<String>,
+    /// Required scopes (comma-delimited)
+    #[arg(long, env = "BAY_AUTH_REQUIRED_SCOPES", value_delimiter = ',', default_value = "")]
+    auth_required_scopes: Vec<String>,
+    /// JWKS cache TTL in seconds
+    #[arg(long, env = "BAY_AUTH_JWKS_CACHE_SECS", default_value_t = 300)]
+    auth_jwks_cache_secs: u64,
+    /// OAuth device authorization endpoint (optional; enables bay-managed device flow)
+    #[arg(long, env = "BAY_AUTH_DEVICE_CODE_URL")]
+    auth_device_code_url: Option<String>,
+    /// OAuth token endpoint polled during device flow
+    #[arg(long, env = "BAY_AUTH_TOKEN_URL")]
+    auth_token_url: Option<String>,
+    /// OAuth client ID used by bay
+    #[arg(long, env = "BAY_AUTH_CLIENT_ID")]
+    auth_client_id: Option<String>,
+    /// OAuth client secret used by bay
+    #[arg(long, env = "BAY_AUTH_CLIENT_SECRET", hide_env_values = true)]
+    auth_client_secret: Option<String>,
+    /// Scopes requested during device flow
+    #[arg(long, env = "BAY_AUTH_SCOPE")]
+    auth_scope: Option<String>,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    let settings = Settings::from_env()?;
+    let args = Args::parse();
+    let settings = Settings::from_args(&args)?;
     println!(
         "Starting TunnelBay with domain {} (HTTP {}, control {})",
         settings.domain, settings.http_addr, settings.control_addr
@@ -333,68 +387,55 @@ struct Settings {
 }
 
 impl Settings {
-    fn from_env() -> Result<Self> {
-        let domain = env::var("BAY_DOMAIN").unwrap_or_else(|_| DEFAULT_DOMAIN.to_string());
-        let control_addr =
-            env::var("BAY_CONTROL_ADDR").unwrap_or_else(|_| DEFAULT_CONTROL_ADDR.to_string());
-        let http_addr = env::var("BAY_HTTP_ADDR").unwrap_or_else(|_| DEFAULT_HTTP_ADDR.to_string());
-        let mode = env::var("BAY_AUTH_MODE").unwrap_or_else(|_| "disabled".into());
-        let auth = auth_from_env(&mode)?;
-        let device_flow = device_flow_from_env(&mode)?;
-        let public_scheme = env::var("BAY_PUBLIC_SCHEME")
-            .unwrap_or_else(|_| DEFAULT_PUBLIC_SCHEME.to_string())
-            .to_lowercase();
+    fn from_args(args: &Args) -> Result<Self> {
+        let domain = args.domain.clone();
+        let control_addr = args.control_addr.clone();
+        let http_addr = args.http_addr.clone();
+        let public_scheme = args.public_scheme.to_lowercase();
 
         if !matches!(public_scheme.as_str(), "http" | "https") {
             anyhow::bail!("BAY_PUBLIC_SCHEME must be 'http' or 'https'");
         }
 
-        let public_port = match env::var("BAY_PUBLIC_PORT") {
-            Ok(value) => value
-                .parse::<u16>()
-                .context("BAY_PUBLIC_PORT must be a valid u16 port number")?,
-            Err(_) => {
-                extract_port(&http_addr).unwrap_or_else(|| default_port_for_scheme(&public_scheme))
-            }
-        };
+        let public_port = args.public_port.unwrap_or_else(|| {
+            extract_port(&http_addr).unwrap_or_else(|| default_port_for_scheme(&public_scheme))
+        });
 
         Ok(Self {
             domain,
             control_addr,
             http_addr,
-            auth,
-            device_flow,
+            auth: auth_from_args(args)?,
+            device_flow: device_flow_from_args(args)?,
             public_scheme,
             public_port,
         })
     }
 }
 
-fn auth_from_env(mode: &str) -> Result<AuthManager> {
-    match mode.to_lowercase().as_str() {
+fn auth_from_args(args: &Args) -> Result<AuthManager> {
+    let required_scopes = args
+        .auth_required_scopes
+        .iter()
+        .map(|scope| scope.trim())
+        .filter(|scope| !scope.is_empty())
+        .map(|scope| scope.to_string())
+        .collect::<Vec<_>>();
+
+    match args.auth_mode.to_lowercase().as_str() {
         "disabled" => Ok(AuthManager::disabled()),
         "oidc" => {
-            let jwks_url = env::var("BAY_AUTH_JWKS_URL")
+            let jwks_url = args
+                .auth_jwks_url
+                .clone()
                 .context("BAY_AUTH_JWKS_URL must be set when BAY_AUTH_MODE=oidc")?;
-            let audience = env::var("BAY_AUTH_AUDIENCE").ok();
-            let issuer = env::var("BAY_AUTH_ISSUER").ok();
-            let required_scopes = env::var("BAY_AUTH_REQUIRED_SCOPES")
-                .unwrap_or_default()
-                .split(',')
-                .map(|scope| scope.trim().to_string())
-                .filter(|scope| !scope.is_empty())
-                .collect::<Vec<_>>();
-            let cache_secs = env::var("BAY_AUTH_JWKS_CACHE_SECS")
-                .ok()
-                .and_then(|value| value.parse::<u64>().ok())
-                .unwrap_or(300);
 
             AuthManager::oidc(OidcConfig {
                 jwks_url,
-                audience,
-                issuer,
+                audience: args.auth_audience.clone(),
+                issuer: args.auth_issuer.clone(),
                 required_scopes,
-                cache_ttl: Duration::from_secs(cache_secs),
+                cache_ttl: Duration::from_secs(args.auth_jwks_cache_secs),
             })
             .context("failed to initialize OIDC authentication")
         }
@@ -402,26 +443,30 @@ fn auth_from_env(mode: &str) -> Result<AuthManager> {
     }
 }
 
-fn device_flow_from_env(mode: &str) -> Result<Option<DeviceFlowManager>> {
-    if !mode.eq_ignore_ascii_case("oidc") {
+fn device_flow_from_args(args: &Args) -> Result<Option<DeviceFlowManager>> {
+    if !args.auth_mode.eq_ignore_ascii_case("oidc") {
         return Ok(None);
     }
 
-    let device_code_url = match env::var("BAY_AUTH_DEVICE_CODE_URL") {
-        Ok(value) => value,
-        Err(_) => return Ok(None),
+    let device_code_url = match args.auth_device_code_url.as_ref() {
+        Some(value) => value.clone(),
+        None => return Ok(None),
     };
 
-    let token_url = env::var("BAY_AUTH_TOKEN_URL").context(
-        "BAY_AUTH_TOKEN_URL must be set when BAY_AUTH_DEVICE_CODE_URL is configured",
-    )?;
-    let client_id = env::var("BAY_AUTH_CLIENT_ID").context(
-        "BAY_AUTH_CLIENT_ID must be set when BAY_AUTH_DEVICE_CODE_URL is configured",
-    )?;
-    let client_secret = env::var("BAY_AUTH_CLIENT_SECRET").ok();
-    let scope =
-        env::var("BAY_AUTH_SCOPE").unwrap_or_else(|_| "openid profile email".to_string());
-    let audience = env::var("BAY_AUTH_AUDIENCE").ok();
+    let token_url = args
+        .auth_token_url
+        .clone()
+        .context("BAY_AUTH_TOKEN_URL must be set when BAY_AUTH_DEVICE_CODE_URL is configured")?;
+    let client_id = args
+        .auth_client_id
+        .clone()
+        .context("BAY_AUTH_CLIENT_ID must be set when BAY_AUTH_DEVICE_CODE_URL is configured")?;
+    let client_secret = args.auth_client_secret.clone();
+    let scope = args
+        .auth_scope
+        .clone()
+        .unwrap_or_else(|| "openid profile email".to_string());
+    let audience = args.auth_audience.clone();
 
     let config = DeviceFlowConfig {
         device_code_url,

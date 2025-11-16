@@ -8,6 +8,7 @@ anyhow = "1"
 axum = { version = "0.8", features = ["ws"] }
 axum-extra = "0.12"
 base64 = "0.22"
+clap = { version = "4.5", features = ["derive", "env"] }
 futures = "0.3"
 http = "1"
 hyper = { version = "1", features = ["http1", "server"] }

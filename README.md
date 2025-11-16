@@ -151,6 +151,8 @@ TLS termination, auth, and multi-tenant policies are intentionally out of scope 
 | `BAY_AUTH_CLIENT_SECRET` (unset) | Optional OAuth client secret (kept on the server). |
 | `BAY_AUTH_SCOPE` (`openid profile email`) | Space-separated scopes bay requests during the device flow. |
 
+These settings are also available as CLI flags (env vars still work); run `cargo run -p bay -- --help` to see all options.
+
 Example:
 
 ```bash

@@ -4,16 +4,7 @@ set dotenv-load := true
 default:
 	@just --list
 
-# Build bay binary via cargo
-build-bay:
-	@cargo build --release -p bay
-
-# Build buoy binary via cargo
-build-buoy:
-	@cargo build --release -p buoy
-
 # Build bay container image
-
 build-bay-container:
 	@docker buildx build \
 		--platform linux/amd64 \
@@ -31,10 +22,8 @@ build-buoy-container:
 		-t tunnelbay-buoy:dev \
 		.
 
-buoy-timvw local_port='3000':
-	export TUNNELBAY_CONTROL_URL="wss://bay.apps.timvw.be/control"; \
-	export TUNNELBAY_LOCAL_PORT="{{local_port}}"; \
-	cargo run -p buoy --release
+bay-local http_port='8080' control_port='7070' domain='127.0.0.1.sslip.io':
+	cargo run -p bay --release -- 
 
 # Run bay locally with OIDC + device flow (defaults to authentik.apps.timvw.be endpoints).
 bay-local-oidc http_port='8080' control_port='7070' domain='127.0.0.1.sslip.io':
@@ -54,9 +43,12 @@ bay-local-oidc http_port='8080' control_port='7070' domain='127.0.0.1.sslip.io':
 	BAY_AUTH_CLIENT_ID=${BAY_AUTH_CLIENT_ID:-tunnelbay} \
 	BAY_AUTH_CLIENT_SECRET="${BAY_AUTH_CLIENT_SECRET}" \
 	BAY_AUTH_SCOPE="openid profile email register:buoy" \
-	cargo run -p bay --bin bay
+	cargo run -p bay --release
 
 # Run buoy against the local bay, relying on bay-managed device login.
 # Optionally override the local port via parameter or env.
 buoy-local local_port='3000':
-	TUNNELBAY_LOCAL_PORT=${TUNNELBAY_LOCAL_PORT:-{{local_port}}} cargo run -p buoy --bin buoy
+	cargo run -p buoy --release -- --port {{local_port}}
+
+buoy-timvw local_port='3000':
+	cargo run -p buoy --release -- --port {{local_port}} --control-url wss://bay.apps.timvw.be/control
