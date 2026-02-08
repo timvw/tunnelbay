@@ -16,7 +16,7 @@ use axum::{
     routing::{any, get, post},
     Json, Router,
 };
-use axum_extra::extract::Host;
+
 use base64::{engine::general_purpose, Engine as _};
 use clap::Parser;
 use futures::{future, SinkExt, StreamExt};
@@ -182,10 +182,10 @@ async fn shutdown_signal() {
 }
 
 async fn proxy_handler(
-    Host(host): Host,
     State(state): State<Arc<AppState>>,
     req: Request<Body>,
 ) -> Result<Response<Body>, StatusCode> {
+    let host = extract_host_from_request(&req).ok_or(StatusCode::BAD_REQUEST)?;
     let slug = extract_slug(&host).ok_or(StatusCode::BAD_REQUEST)?;
     let tunnel = state.get_tunnel(slug).await.ok_or(StatusCode::NOT_FOUND)?;
 
@@ -677,6 +677,27 @@ fn header_map_to_proto(map: &axum::http::HeaderMap) -> Vec<Header> {
             })
         })
         .collect()
+}
+
+fn extract_host_from_request(req: &Request<Body>) -> Option<String> {
+    // Priority: X-Forwarded-Host → Host header → URI authority
+    if let Some(fwd) = req.headers().get("x-forwarded-host") {
+        if let Ok(value) = fwd.to_str() {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+    if let Some(host) = req.headers().get(axum::http::header::HOST) {
+        if let Ok(value) = host.to_str() {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+    req.uri().authority().map(|a| a.to_string())
 }
 
 fn extract_slug(host: &str) -> Option<&str> {
