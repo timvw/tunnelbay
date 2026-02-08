@@ -105,7 +105,7 @@ jobs:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.83"  # From Cargo.toml rust-version
+          toolchain: "1.87"  # MSRV 1.87 - needed for edition2024 support in dependencies
       - uses: Swatinem/rust-cache@v2
       - name: Check MSRV
         run: cargo check --all-features
