@@ -4,10 +4,10 @@ version = "0.10.0"
 edition = "2021"
 
 [dependencies]
-anyhow = "1.0.101"
+anyhow = "1.0.102"
 base64 = "0.22.1"
-clap = { version = "4.5.57", features = ["derive", "env"] }
-futures = "0.3.31"
+clap = { version = "4.5.60", features = ["derive", "env"] }
+futures = "0.3.32"
 reqwest = { version = "0.13.2", default-features = false, features = ["json", "rustls"] }
 proto = { path = "../proto" }
 serde = { version = "1.0.228", features = ["derive"] }
