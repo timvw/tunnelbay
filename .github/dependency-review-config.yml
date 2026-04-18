@@ -9,4 +9,5 @@ allow-licenses:
   - Unicode-DFS-2016
   - MPL-2.0
   - LGPL-3.0
+  - Zlib
 comment-summary-in-pr: always
